@@ -20,4 +20,5 @@ chrono = { version = "0.4", features = ["serde"] }
 config = "0.13"
 anyhow = "1.0"
 sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
+rumqttd = "0.19"
 flux-types = { version = "0.1.0", path = "../flux-types" }

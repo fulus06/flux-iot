@@ -14,6 +14,7 @@ use flux_script::ScriptEngine;
 mod api;
 mod worker;
 mod storage;
+mod mqtt;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -56,6 +57,9 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info,flux_server=debug");
+    }
     tracing_subscriber::fmt::init();
     
     let args = Args::parse();
@@ -162,6 +166,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         storage::start_storage_worker(storage_state).await;
     });
+
+    // 6. Start MQTT Broker (Embedded)
+    let mqtt_state = state.clone();
+    // Spawning in standard thread as rumqttd might be blocking or heavy? 
+    // Actually our start_mqtt_broker spawns its own threads.
+    mqtt::start_mqtt_broker(mqtt_state);
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     tracing::info!("Listening on {}", addr);
