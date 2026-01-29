@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ScriptEngine;
     use serde_json::json;
     use flux_types::message::Message;
 
