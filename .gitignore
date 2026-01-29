@@ -4,3 +4,6 @@ Cargo.lock
 *.wasm
 .DS_Store
 **/Cargo.lock
+
+flux.db
+*.db

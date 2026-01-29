@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             name: Set("default_temp_alert".to_owned()),
             script: Set(r#"
                 if payload.value > 30.0 {
-                    print("Alert: High Temperature detected! (From DB)");
+                    print("Alert: High Temperature detected! (From default)");
                     return true;
                 }
                 return false;

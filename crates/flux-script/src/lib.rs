@@ -55,6 +55,14 @@ impl ScriptEngine {
         let result: bool = self.engine.eval_ast_with_scope(&mut scope, ast)?;
         Ok(result)
     }
+
+    pub fn get_script_ids(&self) -> Vec<String> {
+        self.script_cache.read().unwrap().keys().cloned().collect()
+    }
+
+    pub fn remove_script(&self, id: &str) {
+        self.script_cache.write().unwrap().remove(id);
+    }
 }
 
 mod tests;

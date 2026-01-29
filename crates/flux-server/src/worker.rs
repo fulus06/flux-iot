@@ -33,9 +33,19 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
             Ok(msg) => {
                 tracing::debug!("Worker received message: {}", msg.id);
                 
-                // For MVP, explicitly check 'default_temp_alert'
-                if let Ok(_) = state.script_engine.eval_message("default_temp_alert", &msg) {
-                     // Logged inside engine/script
+                // Dynamic Rule Execution
+                let script_ids = state.script_engine.get_script_ids();
+                for script_id in script_ids {
+                    match state.script_engine.eval_message(&script_id, &msg) {
+                        Ok(triggered) => {
+                             if triggered {
+                                 tracing::warn!("!!! RULE TRIGGERED: {} (msg {}) !!!", script_id, msg.id);
+                             }
+                        },
+                        Err(e) => {
+                            tracing::error!("Failed to execute rule {}: {}", script_id, e);
+                        }
+                    }
                 }
             }
             Err(e) => {
