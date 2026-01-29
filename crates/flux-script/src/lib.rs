@@ -1,24 +1,40 @@
 use rhai::{Engine, Scope, AST};
 use flux_types::message::Message;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub struct ScriptEngine {
     engine: Engine,
     // Cache compiled scripts: script_id -> AST
     script_cache: RwLock<std::collections::HashMap<String, AST>>,
+    // Shared state: key -> value
+    state_store: Arc<RwLock<std::collections::HashMap<String, rhai::Dynamic>>>,
 }
 
 impl ScriptEngine {
     pub fn new() -> Self {
         let mut engine = Engine::new();
+        let state_store = Arc::new(RwLock::new(std::collections::HashMap::new()));
         
-        // Safety: Limit max operations to prevent infinite loops
+        // Safety: Limit max operations
         engine.set_max_operations(100_000);
         
-        // Register types
-        // Message is complex, so we might register it as a Map or specific getters
-        // For simplicity, we can convert to dynamic or register methods if needed.
-        // Rhai works well with serde_json::Value (Map)
+        // Register time function
+        engine.register_fn("now_ms", || {
+            chrono::Utc::now().timestamp_millis()
+        });
+
+        // Register state functions via closures capturing state_store
+        let store = state_store.clone();
+        engine.register_fn("state_get", move |key: &str| -> rhai::Dynamic {
+            let read = store.read().unwrap();
+            read.get(key).cloned().unwrap_or(rhai::Dynamic::UNIT)
+        });
+
+        let store = state_store.clone();
+        engine.register_fn("state_set", move |key: &str, value: rhai::Dynamic| {
+            let mut write = store.write().unwrap();
+            write.insert(key.to_string(), value);
+        });
         
         // Redirect print() to tracing::info!
         engine.on_print(|x| {
@@ -28,9 +44,10 @@ impl ScriptEngine {
         Self {
             engine,
             script_cache: RwLock::new(std::collections::HashMap::new()),
+            state_store,
         }
     }
-
+    
     pub fn compile_script(&self, script_id: &str, script: &str) -> Result<(), Box<dyn std::error::Error>> {
         let ast = self.engine.compile(script)?;
         self.script_cache.write().unwrap().insert(script_id.to_string(), ast);

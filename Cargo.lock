@@ -1087,6 +1087,7 @@ dependencies = [
 name = "flux-script"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "flux-types",
  "rhai",
  "serde",
