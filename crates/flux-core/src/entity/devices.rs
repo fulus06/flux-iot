@@ -7,6 +7,8 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
     pub last_seen: i64,
+    #[sea_orm(nullable)]
+    pub token: Option<String>,
     #[sea_orm(column_type = "Json", nullable)]
     pub meta: Option<Json>,
 }

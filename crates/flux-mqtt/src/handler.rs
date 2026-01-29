@@ -1,28 +1,30 @@
-use std::rc::Rc;
 use std::sync::Arc;
-use ntex::service::{fn_factory_with_config, fn_service};
-use ntex::util::{Ready, ByteString};
+
 use ntex_mqtt::{v3, v5};
 use flux_core::bus::EventBus;
 use flux_types::message::Message;
 use crate::manager::MqttManager;
 
+use flux_core::traits::auth::Authenticator;
+
 #[derive(Clone)]
 pub struct Handler {
     manager: MqttManager,
     event_bus: Arc<EventBus>,
+    authenticator: Arc<dyn Authenticator>,
     client_id: Option<String>,
 }
 
 impl Handler {
-    pub fn new(manager: MqttManager, event_bus: Arc<EventBus>) -> Self {
-        Self { manager, event_bus, client_id: None }
+    pub fn new(manager: MqttManager, event_bus: Arc<EventBus>, authenticator: Arc<dyn Authenticator>) -> Self {
+        Self { manager, event_bus, authenticator, client_id: None }
     }
     
     pub fn with_client_id(&self, client_id: String) -> Self {
         Self {
             manager: self.manager.clone(),
             event_bus: self.event_bus.clone(),
+            authenticator: self.authenticator.clone(),
             client_id: Some(client_id),
         }
     }
@@ -50,10 +52,32 @@ pub async fn handshake_v3(
     handshake: v3::Handshake,
     handler: Handler,
 ) -> Result<v3::HandshakeAck<Handler>, ServerError> {
-    let client_id = handshake.packet().client_id.to_string();
-    handler.manager.add_v3(client_id.clone(), handshake.sink());
-    Ok(handshake.ack(handler.with_client_id(client_id), false))
+    let packet = handshake.packet();
+    let client_id = packet.client_id.as_str();
+    // V3: password is Bytes
+    let password = packet.password.as_deref();
+    let username = packet.username.as_deref();
+
+    match handler.authenticator.authenticate(client_id, username, password).await {
+        Ok(true) => {
+            let client_id = client_id.to_string();
+            handler.manager.add_v3(client_id.clone(), handshake.sink());
+            Ok(handshake.ack(handler.with_client_id(client_id), false))
+        }
+        Ok(false) => {
+            // 0.7 might not have bad_username_or_pwd helper.
+            // Returning error drops connection, which is fine for auth failure.
+            tracing::warn!("Auth failed for client: {}, dropping connection", client_id);
+            Err(ServerError)
+        }
+        Err(e) => {
+            tracing::error!("Auth error: {}", e);
+            // Treat as bad auth or server error?
+            Err(ServerError)
+        }
+    }
 }
+
 
 pub async fn control_v3(
     session: v3::Session<Handler>,
@@ -78,21 +102,11 @@ pub async fn control_v3(
         v3::Control::Flow(v3::CtlFlow::Ping(ping)) => {
             Ok(ping.ack())
         }
-        v3::Control::Stop(msg) => {
-             if let Some(id) = &session.state().client_id {
-                 session.state().manager.remove(id);
-             }
-             Ok(v3::Control::<ServerError>::Stop(msg).ack())
-        }
-        v3::Control::Shutdown(msg) => {
-             if let Some(id) = &session.state().client_id {
-                 session.state().manager.remove(id);
-             }
-             Ok(v3::Control::<ServerError>::Shutdown(msg).ack())
-        }
         other => Ok(other.ack())
     }
 }
+
+// ...
 
 pub async fn publish_v3(
     session: v3::Session<Handler>,
@@ -120,14 +134,32 @@ pub async fn publish_v3(
     Ok(())
 }
 
-// V5 Handlers
+// ...
+
 pub async fn handshake_v5(
     handshake: v5::Handshake,
     handler: Handler,
 ) -> Result<v5::HandshakeAck<Handler>, ServerError> {
-    let client_id = handshake.packet().client_id.to_string();
-    handler.manager.add_v5(client_id.clone(), handshake.sink());
-    Ok(handshake.ack(handler.with_client_id(client_id)))
+    let packet = handshake.packet();
+    let client_id = packet.client_id.as_str();
+    let password = packet.password.as_deref();
+    let username = packet.username.as_deref();
+
+    match handler.authenticator.authenticate(client_id, username, password).await {
+        Ok(true) => {
+            let client_id = client_id.to_string();
+            handler.manager.add_v5(client_id.clone(), handshake.sink());
+            Ok(handshake.ack(handler.with_client_id(client_id)))
+        }
+        Ok(false) => {
+             tracing::warn!("Auth failed for client: {}", client_id);
+             Ok(handshake.failed(v5::codec::ConnectAckReason::BadUserNameOrPassword))
+        }
+        Err(e) => {
+            tracing::error!("Auth error: {}", e);
+            Ok(handshake.failed(v5::codec::ConnectAckReason::UnspecifiedError))
+        }
+    }
 }
 
 pub async fn control_v5(
@@ -152,19 +184,6 @@ pub async fn control_v5(
         }
         v5::Control::Flow(v5::CtlFlow::Ping(ping)) => {
             Ok(ping.ack())
-        }
-        // Match Stop/Shutdown to cleanup, but we need to keep the msg to Ack it.
-        v5::Control::Stop(msg) => {
-             if let Some(id) = &session.state().client_id {
-                 session.state().manager.remove(id);
-             }
-             Ok(v5::Control::<ServerError>::Stop(msg).ack())
-        }
-        v5::Control::Shutdown(msg) => {
-             if let Some(id) = &session.state().client_id {
-                 session.state().manager.remove(id);
-             }
-             Ok(v5::Control::<ServerError>::Shutdown(msg).ack())
         }
         other => Ok(other.ack())
     }

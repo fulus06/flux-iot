@@ -1,9 +1,9 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use flux_types::message::Message;
+
 use ntex_mqtt::{v3, v5};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub enum MqttSink {

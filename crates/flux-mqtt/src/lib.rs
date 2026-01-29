@@ -11,25 +11,27 @@ mod handler;
 use manager::MqttManager;
 use handler::Handler;
 
-pub fn start_broker(event_bus: Arc<EventBus>) {
+use flux_core::traits::auth::Authenticator;
+
+pub fn start_broker(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authenticator>) {
     tracing::info!("Starting Flux MQTT Broker (ntex) on 0.0.0.0:1883");
 
     let server_bus = event_bus.clone();
 
     // 1. Spawn Ntex System in a separate thread
     thread::spawn(move || {
-        let _ = run_mqtt_server(server_bus);
+        let _ = run_mqtt_server(server_bus, authenticator);
     });
 }
 
 #[ntex::main]
-async fn run_mqtt_server(event_bus: Arc<EventBus>) -> std::io::Result<()> {
+async fn run_mqtt_server(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authenticator>) -> std::io::Result<()> {
     
     ntex::server::build()
         .bind("mqtt", "0.0.0.0:1883", move |_| {
             // Per-worker initialization
             let manager = MqttManager::new();
-            let handler = Handler::new(manager.clone(), event_bus.clone());
+            let handler = Handler::new(manager.clone(), event_bus.clone(), authenticator.clone());
             let h_v3 = handler.clone();
             let h_v5 = handler.clone();
             

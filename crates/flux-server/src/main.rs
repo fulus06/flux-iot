@@ -14,6 +14,7 @@ use flux_script::ScriptEngine;
 mod api;
 mod worker;
 mod storage;
+mod auth;
 
 
 #[derive(Parser, Debug)]
@@ -97,6 +98,19 @@ async fn main() -> anyhow::Result<()> {
     db.execute(backend.build(&stmt)).await?;
     tracing::info!("Database initialized and migrations applied.");
     
+    // Seed Test Device
+    let device_count = devices::Entity::find().count(&db).await?;
+    if device_count == 0 {
+        tracing::info!("Seeding test device...");
+        let device = devices::ActiveModel {
+            id: Set("test_device".to_owned()),
+            token: Set(Some("password123".to_owned())),
+            last_seen: Set(chrono::Utc::now().timestamp_millis()),
+            ..Default::default()
+        };
+        device.insert(&db).await?;
+    }
+    
     // Seed Default Rule
     use sea_orm::{EntityTrait, Set, ActiveModelTrait};
     let rule_count = rules::Entity::find().count(&db).await?;
@@ -170,7 +184,8 @@ async fn main() -> anyhow::Result<()> {
     // 6. Start MQTT Broker (Embedded)
     // 6. Start MQTT Broker (Ntex)
     let mqtt_bus = state.event_bus.clone();
-    flux_mqtt::start_broker(mqtt_bus);
+    let authenticator = Arc::new(auth::DbAuthenticator::new(state.db.clone()));
+    flux_mqtt::start_broker(mqtt_bus, authenticator);
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     tracing::info!("Listening on {}", addr);
