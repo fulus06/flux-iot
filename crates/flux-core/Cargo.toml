@@ -7,5 +7,6 @@ edition = "2021"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 anyhow = "1.0"
-sea-orm = { version = "1.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
 flux-types = { path = "../flux-types" }

@@ -3,6 +3,8 @@ use config::Config;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use sea_orm::{Database, DatabaseConnection, PaginatorTrait}; // SeaORM
+use flux_core::entity::{prelude::*, rules, events, devices}; // Entities
 
 // Import our core crates
 use flux_core::bus::EventBus;
@@ -11,6 +13,7 @@ use flux_script::ScriptEngine;
 
 mod api;
 mod worker;
+mod storage;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -19,19 +22,25 @@ struct Args {
     config: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
+    pub database: DatabaseConfig,
     pub plugins: PluginConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
+pub struct DatabaseConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct PluginConfig {
     pub directory: String,
 }
@@ -41,6 +50,7 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub plugin_manager: Arc<PluginManager>,
     pub script_engine: Arc<ScriptEngine>,
+    pub db: DatabaseConnection,
     pub config: AppConfig,
 }
 
@@ -63,6 +73,46 @@ async fn main() -> anyhow::Result<()> {
     let event_bus = Arc::new(EventBus::new(1024));
     let plugin_manager = Arc::new(PluginManager::new()?);
     let script_engine = Arc::new(ScriptEngine::new());
+
+    // Connect to Database
+    tracing::info!("Connecting to database: {}", app_config.database.url);
+    let db = Database::connect(&app_config.database.url).await?;
+    
+    // Create Tables (Simple Migration for MVP)
+    use sea_orm::{Schema, ConnectionTrait};
+    let backend = db.get_database_backend();
+    let schema = Schema::new(backend);
+    
+    let stmt = schema.create_table_from_entity(Rules).if_not_exists().to_owned();
+    db.execute(backend.build(&stmt)).await?;
+    
+    let stmt = schema.create_table_from_entity(Events).if_not_exists().to_owned();
+    db.execute(backend.build(&stmt)).await?;
+    
+    let stmt = schema.create_table_from_entity(Devices).if_not_exists().to_owned();
+    db.execute(backend.build(&stmt)).await?;
+    tracing::info!("Database initialized and migrations applied.");
+    
+    // Seed Default Rule
+    use sea_orm::{EntityTrait, Set, ActiveModelTrait};
+    let rule_count = rules::Entity::find().count(&db).await?;
+    if rule_count == 0 {
+        tracing::info!("Seeding default rule...");
+        let rule = rules::ActiveModel {
+            name: Set("default_temp_alert".to_owned()),
+            script: Set(r#"
+                if payload.value > 30.0 {
+                    print("Alert: High Temperature detected! (From DB)");
+                    return true;
+                }
+                return false;
+            "#.to_owned()),
+            active: Set(true),
+            created_at: Set(chrono::Utc::now().timestamp_millis()),
+            ..Default::default() // Let DB handle ID if auto-increment (sqlite rowid)
+        };
+        rule.insert(&db).await?;
+    }
     
     // Load Plugins
     // TODO: move to a proper loader service
@@ -93,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         event_bus: event_bus.clone(),
         plugin_manager: plugin_manager.clone(),
         script_engine: script_engine.clone(),
+        db: db.clone(),
         config: app_config,
     });
     
@@ -104,6 +155,12 @@ async fn main() -> anyhow::Result<()> {
     let worker_state = state.clone();
     tokio::spawn(async move {
         worker::start_rule_worker(worker_state).await;
+    });
+
+    // 5. Start Storage Worker
+    let storage_state = state.clone();
+    tokio::spawn(async move {
+        storage::start_storage_worker(storage_state).await;
     });
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);

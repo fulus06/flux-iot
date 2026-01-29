@@ -5,21 +5,24 @@ use flux_types::message::Message;
 pub async fn start_rule_worker(state: Arc<AppState>) {
     tracing::info!("Starting Rule Worker...");
 
-    // Pre-compile a demo script
-    // In reality, we would load this from DB or Config
-    let script = r#"
-        // Demo Rule: Alert if temperature > 30
-        if payload.value > 30.0 {
-            print("Alert: High Temperature detected!");
-            return true;
-        }
-        return false;
-    "#;
+    // Load rules from DB
+    use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
+    use flux_core::entity::rules;
     
-    if let Err(e) = state.script_engine.compile_script("rule_demo", script) {
-        tracing::error!("Failed to compile demo script: {}", e);
-    } else {
-        tracing::info!("Demo script 'rule_demo' compiled successfully.");
+    match rules::Entity::find()
+        .filter(rules::Column::Active.eq(true))
+        .all(&state.db)
+        .await 
+    {
+        Ok(active_rules) => {
+            for rule in active_rules {
+                tracing::info!("Compiling rule: {}", rule.name);
+                if let Err(e) = state.script_engine.compile_script(&rule.name, &rule.script) {
+                    tracing::error!("Failed to compile rule '{}': {}", rule.name, e);
+                }
+            }
+        },
+        Err(e) => tracing::error!("Failed to load rules from DB: {}", e),
     }
 
     // Subscribe to EventBus
@@ -29,25 +32,14 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
         match rx.recv().await {
             Ok(msg) => {
                 tracing::debug!("Worker received message: {}", msg.id);
-                // Execute Rule
-                match state.script_engine.eval_message("rule_demo", &msg) {
-                    Ok(triggered) => {
-                        if triggered {
-                            tracing::warn!("!!! RULE TRIGGERED for msg {} !!!", msg.id);
-                        } else {
-                            tracing::debug!("Rule evaluated: no trigger");
-                        }
-                    },
-                    Err(e) => {
-                        tracing::error!("Script execution failed: {}", e);
-                    }
+                
+                // For MVP, explicitly check 'default_temp_alert'
+                if let Ok(_) = state.script_engine.eval_message("default_temp_alert", &msg) {
+                     // Logged inside engine/script
                 }
             }
             Err(e) => {
                 tracing::error!("Bus subscription error: {}", e);
-                // If lagged, we might want to continue. use RecvError::Lagged handling if needed.
-                // For broadcast, RecvError::Lagged means we missed messages.
-                // RecvError::Closed means bus is closed.
                 if e.to_string().contains("closed") {
                     break;
                 }
