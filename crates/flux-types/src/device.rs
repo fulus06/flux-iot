@@ -9,9 +9,10 @@ pub struct DeviceData {
 }
 
 impl DeviceData {
-    pub fn new(device_id: impl Into<String>, values: HashMap<String, f64>) -> Self {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(device_id: String, values: HashMap<String, f64>) -> Self {
         Self {
-            device_id: device_id.into(),
+            device_id,
             values,
             timestamp: chrono::Utc::now().timestamp_millis(),
         }

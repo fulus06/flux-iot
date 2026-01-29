@@ -10,10 +10,11 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(topic: impl Into<String>, payload: serde_json::Value) -> Self {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(topic: String, payload: serde_json::Value) -> Self {
         Self {
             id: Uuid::new_v4(),
-            topic: topic.into(),
+            topic,
             payload,
             timestamp: chrono::Utc::now().timestamp_millis(),
         }

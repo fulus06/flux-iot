@@ -20,6 +20,11 @@ impl ScriptEngine {
         // For simplicity, we can convert to dynamic or register methods if needed.
         // Rhai works well with serde_json::Value (Map)
         
+        // Redirect print() to tracing::info!
+        engine.on_print(|x| {
+            tracing::info!("SCRIPT: {}", x);
+        });
+        
         Self {
             engine,
             script_cache: RwLock::new(std::collections::HashMap::new()),

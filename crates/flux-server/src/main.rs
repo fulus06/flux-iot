@@ -9,6 +9,9 @@ use flux_core::bus::EventBus;
 use flux_plugin::PluginManager;
 use flux_script::ScriptEngine;
 
+mod api;
+mod worker;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
@@ -17,28 +20,28 @@ struct Args {
 }
 
 #[derive(Debug, Deserialize)]
-struct AppConfig {
-    server: ServerConfig,
-    plugins: PluginConfig,
+pub struct AppConfig {
+    pub server: ServerConfig,
+    pub plugins: PluginConfig,
 }
 
 #[derive(Debug, Deserialize)]
-struct ServerConfig {
-    host: String,
-    port: u16,
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Deserialize)]
-struct PluginConfig {
-    directory: String,
+pub struct PluginConfig {
+    pub directory: String,
 }
 
 // Global Application State
-struct AppState {
-    event_bus: Arc<EventBus>,
-    plugin_manager: Arc<PluginManager>,
-    script_engine: Arc<ScriptEngine>,
-    config: AppConfig,
+pub struct AppState {
+    pub event_bus: Arc<EventBus>,
+    pub plugin_manager: Arc<PluginManager>,
+    pub script_engine: Arc<ScriptEngine>,
+    pub config: AppConfig,
 }
 
 #[tokio::main]
@@ -61,6 +64,31 @@ async fn main() -> anyhow::Result<()> {
     let plugin_manager = Arc::new(PluginManager::new()?);
     let script_engine = Arc::new(ScriptEngine::new());
     
+    // Load Plugins
+    // TODO: move to a proper loader service
+    let plugin_dir = &app_config.plugins.directory;
+    tracing::info!("Loading plugins from: {}", plugin_dir);
+    
+    if let Ok(entries) = std::fs::read_dir(plugin_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "wasm") {
+                tracing::info!("Found plugin: {:?}", path);
+                if let Ok(bytes) = std::fs::read(&path) {
+                    let filename = path.file_stem().unwrap().to_string_lossy();
+                    // Load the plugin
+                    if let Err(e) = plugin_manager.load_plugin(&filename, &bytes) {
+                        tracing::error!("Failed to load plugin {}: {:?}", filename, e);
+                    } else {
+                        tracing::info!("Successfully loaded plugin: {}", filename);
+                    }
+                }
+            }
+        }
+    } else {
+        tracing::warn!("Plugin directory not found: {}", plugin_dir);
+    }
+
     let state = Arc::new(AppState {
         event_bus: event_bus.clone(),
         plugin_manager: plugin_manager.clone(),
@@ -68,10 +96,15 @@ async fn main() -> anyhow::Result<()> {
         config: app_config,
     });
     
+    
     // 3. Start API Server (Axum)
-    // TODO: move to api module
-    let app = axum::Router::new()
-        .route("/health", axum::routing::get(|| async { "OK" }));
+    let app = api::create_router(state.clone());
+    
+    // 4. Start Rule Worker
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        worker::start_rule_worker(worker_state).await;
+    });
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     tracing::info!("Listening on {}", addr);
