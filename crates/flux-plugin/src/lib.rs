@@ -1,7 +1,5 @@
-pub struct PluginManager;
+pub mod memory;
+pub mod wasm_host;
+pub mod manager;
 
-impl PluginManager {
-    pub fn new() -> Self {
-        Self
-    }
-}
+pub use manager::PluginManager;

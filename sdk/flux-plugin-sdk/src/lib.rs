@@ -1,3 +1,5 @@
 pub use flux_types;
 
-// TODO: Add exported macros for plugins
+pub mod macros;
+pub use macros::*;
+
