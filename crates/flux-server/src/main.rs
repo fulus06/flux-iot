@@ -14,7 +14,7 @@ use flux_script::ScriptEngine;
 mod api;
 mod worker;
 mod storage;
-mod mqtt;
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -168,17 +168,42 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 6. Start MQTT Broker (Embedded)
-    let mqtt_state = state.clone();
-    // Spawning in standard thread as rumqttd might be blocking or heavy? 
-    // Actually our start_mqtt_broker spawns its own threads.
-    mqtt::start_mqtt_broker(mqtt_state);
+    // 6. Start MQTT Broker (Ntex)
+    let mqtt_bus = state.event_bus.clone();
+    flux_mqtt::start_broker(mqtt_bus);
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     tracing::info!("Listening on {}", addr);
     
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("signal received, starting graceful shutdown");
 }
