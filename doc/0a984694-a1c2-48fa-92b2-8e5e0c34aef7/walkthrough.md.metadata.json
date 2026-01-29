@@ -1,0 +1,6 @@
+{
+  "artifactType": "ARTIFACT_TYPE_WALKTHROUGH",
+  "summary": "Implemented proper signal handling and graceful shutdown.",
+  "updatedAt": "2026-01-29T11:16:52.439710Z",
+  "version": "2"
+}

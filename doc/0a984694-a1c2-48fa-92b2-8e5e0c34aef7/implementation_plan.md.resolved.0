@@ -1,0 +1,91 @@
+# FLUX IOT Architectue & Project Structure Design
+
+## Goal Description
+Establish a highly modular, maintainable, and high-performance project structure for **FLUX IOT**, adhering to the "Rust Core + Wasm Plugin + Rhai Script" architecture. The design focuses on zero-cost abstractions, clear boundaries, and standard Rust workspace practices.
+
+## Proposed Project Structure
+
+We will use a **Cargo Workspace** to manage multiple crates. This ensures fast compilation, shared dependencies, and logical separation.
+
+```text
+flux-iot/
+├── Cargo.toml                  # Workspace definition
+├── .gitignore
+├── README.md
+├── docs/                       # Architecture & API docs
+├── scripts/                    # Rhai scripts (Runtime assets)
+├── plugins/                    # Wasm plugins (Source & Compiled)
+│   └── modbus-tcp/             # Example Wasm Plugin
+├── crates/
+│   ├── flux-types/             # [Shared] Common DTOs, Enums, Error definitions
+│   │                           # Used by Core and Plugin SDK.
+│   ├── flux-core/              # [Kernel] Domain logic, Traits, DB Entities (SeaORM)
+│   │                           # DeviceManager, EventBus, RuleEngine traits.
+│   ├── flux-plugin/            # [Runtime] Wasmtime Host implementation
+│   │                           # Loads .wasm, manages memory, handles imports/exports.
+│   ├── flux-script/            # [Runtime] Rhai Engine wrapper
+│   │                           # Registers custom types and functions for scripts.
+│   └── flux-server/            # [Binary] Application Entry Point
+│                               # Tokio Runtime, Axum API, Wiring services together.
+└── sdk/
+    └── flux-plugin-sdk/        # [SDK] For Plugin Developers
+                                # Guest bindings, Macros for exporting functions.
+```
+
+## Detailed Crate Responsibilities
+
+### 1. `flux-types` (Library)
+*   **Purpose**: The "Lingua Franca" between Host and Guest.
+*   **Contents**:
+    *   `Message`: Standard event structure.
+    *   `DeviceData`: Sensor readings map.
+    *   `PluginConfig`: Configuration structs.
+*   **Dependencies**: `serde`, `serde_json`, `uuid`.
+
+### 2. `flux-core` (Library)
+*   **Purpose**: The business logic kernel.
+*   **Contents**:
+    *   `entity/`: SeaORM entities.
+    *   `bus/`: `EventBus` (tokio::broadcast / MPSC).
+    *   `traits/`: `PluginHost`, `ScriptEngine` traits.
+    *   `service/`: `DeviceService`, `AlarmService`.
+*   **Dependencies**: `tokio`, `sea-orm`, `tracing`, `flux-types`.
+
+### 3. `flux-plugin` (Library)
+*   **Purpose**: Wasm Runtime isolation layer.
+*   **Contents**:
+    *   `PluginManager`: Loads internal plugins.
+    *   `WasmHost`: Wraps `wasmtime::Engine`.
+    *   `memory.rs`: Efficient memory copying between Host/Guest.
+*   **Dependencies**: `wasmtime`, `anyhow`, `flux-types`.
+
+### 4. `flux-server` (Binary)
+*   **Purpose**: wiring and execution.
+*   **Contents**:
+    *   `main.rs`: Setup logging, connection pools, start actors.
+    *   `api/`: Axum handlers (REST/WebSocket).
+    *   `mqtt/`: MQTT Broker/Client integration.
+*   **Dependencies**: `axum`, `tokio`, `clap`, `flux-core`, `flux-plugin`, `flux-script`.
+
+### 5. `flux-plugin-sdk` (Library)
+*   **Purpose**: Minimal dependency crate for Wasm developers.
+*   **Contents**:
+    *   Helper macros (`export_plugin!`).
+    *   Re-exports `flux-types`.
+*   **Target**: `wasm32-unknown-unknown`.
+
+## Verification Plan
+Since this is a structural setup, verification involves creating the structure and ensuring it compiles.
+
+### Automated Tests
+1.  **Workspace Compile**: Run `cargo build` to ensure all crates link correctly.
+2.  **Plugin Test**:
+    *   Create a dummy `modbus` plugin using `flux-plugin-sdk`.
+    *   Compile it to wasm.
+    *   Run a test in `flux-server` that loads this wasm and executes a function.
+3.  **Script Test**:
+    *   Run a test in `flux-script` that evaluates a simple Rhai script.
+
+### Manual Verification
+*   Inspect directory tree to match the design.
+*   Check circular dependencies (should be none).

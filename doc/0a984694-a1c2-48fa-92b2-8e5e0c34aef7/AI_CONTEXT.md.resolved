@@ -1,0 +1,49 @@
+
+# AI Context for FLUX IOT Migration
+
+**Project Goal**: Build a high-performance IoT Platform in Rust, featuring an embedded MQTT broker, dynamic rule engine (Rhai), and Wasm plugin system.
+
+## 1. Project Status (Completed Phases 0-9)
+We have successfully implemented the core architecture and key features:
+
+*   **Architecture**: Cargo Workspace with strict crate boundaries (`flux-core`, `flux-server`, `flux-mqtt`, `flux-plugin`, `flux-script`).
+*   **Core**: `EventBus` (Tokio broadcast), Type definitions ([Message](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/message.rs#5-11), [DeviceData](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/device.rs#5-10)).
+*   **Plugins**: Wasmtime-based plugin system. Supports loading [.wasm](file:///Volumes/fushilu/workspace/flux-iot/plugins/dummy_plugin/target/wasm32-unknown-unknown/debug/dummy_plugin.wasm) files and basic string/memory bridging.
+*   **Script Engine**: Rhai-based rule engine.
+    *   **Advanced Features**: Shared State (`state_get`/`state_set`) and Time (`now_ms`) support implemented.
+*   **Database**: SQLite via Sea-ORM. Stores `devices` (with auth tokens), `events`, and [rules](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-server/src/api.rs#127-133).
+*   **MQTT Broker**: Custom Ntex-based embedded broker (`flux-mqtt`).
+    *   Supports v3.1.1 and v5.0 protocols.
+    *   **Authentication**: Implemented [DbAuthenticator](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-server/src/auth.rs#8-12). Connects Ntex runtime (broker) with Tokio runtime (DB access) to verify ClientID/Password.
+
+## 2. Architecture & Design Decisions
+*   **Runtime Split**: The project uses **Tokio** for the main Server/DB/EventBus, but **Ntex** for the MQTT Broker.
+    *   *Hidden Knowledge*: Ntex is single-threaded/Actor-like by default. To make it work with `Sea-ORM` (which requires Tokio), we pass a `tokio::runtime::Handle` to the [DbAuthenticator](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-server/src/auth.rs#8-12) to spawn DB queries on the Tokio thread pool.
+*   **Schema**:
+    *   `devices`: [id](file:///Volumes/fushilu/workspace/flux-iot/temp/ntex-mqtt/src/v3/control.rs#177-181) (client_id), `token` (password), `last_seen`.
+    *   [rules](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-server/src/api.rs#127-133): [id](file:///Volumes/fushilu/workspace/flux-iot/temp/ntex-mqtt/src/v3/control.rs#177-181), `name`, [script](file:///Volumes/fushilu/workspace/flux-iot/temp/ntex-mqtt/src/v3/control.rs#372-377) (Rhai code), `active`.
+    *   `events`: [id](file:///Volumes/fushilu/workspace/flux-iot/temp/ntex-mqtt/src/v3/control.rs#177-181), [topic](file:///Volumes/fushilu/workspace/flux-iot/temp/ntex-mqtt/src/v5/control.rs#411-415), `payload`, `timestamp`.
+*   **MQTT Library**: We are using `ntex-mqtt = "0.7.0-pre.1"` (local/git version in some context, but pinned in Cargo). This was chosen for v5 support performance.
+*   **Plugin Safety**: Wasm execution is sandboxed. We implemented a memory bridge to pass Strings safe across the boundary.
+
+## 3. Current Known Issues / Bugs
+*   **Port Conflict on Restart**: The server sometimes fails to restart immediately with `Address already in use (os error 48)` on port 3000 or 1883 if the previous process didn't shut down gracefully.
+    *   *Workaround*: Wait a few seconds or `kill -9` the zombie process.
+*   **Ntex-Mqtt Pre-release**: We are using a pre-release version. API might change.
+*   **Unit Test Warning**: Some unused imports in tests, but tests pass.
+
+## 4. Next Steps (Roadmap)
+1.  **System Observability**: Add Prometheus metrics and structured logging.
+2.  **Access Control (ACL)**: Implement topic-level permissions (currently only AuthN is implemented, AuthZ is open).
+3.  **Production Hardening**:
+    *   Hash passwords in DB (currently stored as plain text for MVP).
+    *   Optimize Wasm memory usage.
+
+## 5. Development Tips
+*   **Run Server**: `cargo run -p flux-server`
+*   **Run Tests**: `cargo test --workspace`
+*   **Reset DB**: `rm flux.db` (Schema changes require reset currently as migration logic is basic auto-create).
+*   **Test MQTT**: Use [test_mqtt.py](file:///Volumes/fushilu/workspace/flux-iot/test_mqtt.py) or MQTTX.
+    *   Default Credentials: ClientID=`test_device`, Password=`password123`.
+
+**End of Context**

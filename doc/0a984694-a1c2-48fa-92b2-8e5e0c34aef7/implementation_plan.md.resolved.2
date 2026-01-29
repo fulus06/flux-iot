@@ -1,0 +1,63 @@
+# Implementation Plan - Phase 8: MQTT Authentication
+
+## Goal
+Secure the MQTT Broker by implementing authentication. Only authorized devices/users should be able to connect and publish/subscribe.
+
+## User Requirements
+- Support Username/Password verification.
+- Support Device ID verification.
+- Flexible architecture to support multiple methods.
+
+## Proposed Changes
+
+### 1. Database Schema Update (`flux-core`)
+We need to store credentials. For IoT devices, we'll enhance the `devices` table.
+
+#### [MODIFY] `devices` Table
+Add a `token` column to store the authentication token (password).
+```sql
+ALTER TABLE "devices" ADD COLUMN "token" text;
+```
+*Note: In production, we should hash this. For MVP, we might store plain/hashed text.*
+
+### 2. Core Abstractions (`flux-core`)
+Define an interface for authentication to decouple the Broker from the DB.
+
+#### [NEW] `crates/flux-core/src/traits/auth.rs`
+```rust
+#[async_trait]
+pub trait Authenticator: Send + Sync {
+    async fn authenticate(&self, client_id: &str, username: Option<&str>, password: Option<&[u8]>) -> Result<bool, anyhow::Error>;
+}
+```
+
+### 3. Server Implementation (`flux-server`)
+Implement the trait using SeaORM to check against the database.
+
+#### [NEW] `crates/flux-server/src/auth.rs`
+- `DbAuthenticator` struct wrapping `DatabaseConnection`.
+- Implements `Authenticator`.
+- Logic:
+    - If `password` is provided, check against `devices.token`.
+    - [client_id](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/handler.rs#22-29) must match `devices.id`.
+    - (Optional) `username` check.
+
+### 4. Broker Integration (`flux-mqtt`)
+Update the broker to use the authenticator during Handshake.
+
+#### [MODIFY] [crates/flux-mqtt/src/lib.rs](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/lib.rs) & [manager.rs](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/manager.rs)
+- [start_broker](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/lib.rs#14-24) accepts `Arc<dyn Authenticator>`.
+- Pass it to [MqttManager](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/manager.rs#45-48) or [Handler](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/handler.rs#11-16).
+
+#### [MODIFY] [crates/flux-mqtt/src/handler.rs](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/handler.rs)
+- Update [handshake_v3](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/handler.rs#48-57) / [handshake_v5](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-mqtt/src/handler.rs#123-132).
+- Extract credentials from `Handshake` packet.
+- Call `authenticator.authenticate(...)`.
+- If false, return `BadUserNameOrPassword` (v3) or `BadUserNameOrPassword`/`NotAuthorized` (v5).
+
+## Verification Plan
+1.  **Manual Test**:
+    - Insert a device with a token into DB.
+    - Connect with MQTTX using correct ClientID/Password -> Success.
+    - Connect with wrong Password -> Failure.
+    - Connect with unknown ClientID -> Failure.

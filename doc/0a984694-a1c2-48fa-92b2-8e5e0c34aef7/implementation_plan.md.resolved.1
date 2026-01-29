@@ -1,0 +1,110 @@
+# FLUX IOT Architectue & Project Structure Design
+
+## Goal Description
+Establish a highly modular, maintainable, and high-performance project structure for **FLUX IOT**, adhering to the "Rust Core + Wasm Plugin + Rhai Script" architecture. The design focuses on zero-cost abstractions, clear boundaries, and standard Rust workspace practices.
+
+## Proposed Project Structure
+
+We will use a **Cargo Workspace** to manage multiple crates. This ensures fast compilation, shared dependencies, and logical separation.
+
+```text
+flux-iot/
+├── Cargo.toml                  # Workspace definition
+├── .gitignore
+├── README.md
+├── docs/                       # Architecture & API docs
+├── scripts/                    # Rhai scripts (Runtime assets)
+├── plugins/                    # Wasm plugins (Source & Compiled)
+│   └── modbus-tcp/             # Example Wasm Plugin
+├── crates/
+│   ├── flux-types/             # [Shared] Common DTOs, Enums, Error definitions
+│   │                           # Used by Core and Plugin SDK.
+│   ├── flux-core/              # [Kernel] Domain logic, Traits, DB Entities (SeaORM)
+│   │                           # DeviceManager, EventBus, RuleEngine traits.
+│   ├── flux-plugin/            # [Runtime] Wasmtime Host implementation
+│   │                           # Loads .wasm, manages memory, handles imports/exports.
+│   ├── flux-script/            # [Runtime] Rhai Engine wrapper
+│   │                           # Registers custom types and functions for scripts.
+│   └── flux-server/            # [Binary] Application Entry Point
+│                               # Tokio Runtime, Axum API, Wiring services together.
+└── sdk/
+    └── flux-plugin-sdk/        # [SDK] For Plugin Developers
+                                # Guest bindings, Macros for exporting functions.
+```
+
+## Detailed Crate Responsibilities
+
+### 1. `flux-types` (Library)
+*   **Purpose**: The "Lingua Franca" between Host and Guest.
+*   **Contents**:
+    *   [Message](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/message.rs#5-11): Standard event structure.
+    *   [DeviceData](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/device.rs#5-10): Sensor readings map.
+    *   [PluginConfig](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-server/src/main.rs#44-47): Configuration structs.
+*   **Dependencies**: `serde`, `serde_json`, `uuid`.
+
+### 2. `flux-core` (Library)
+*   **Purpose**: The business logic kernel.
+*   **Contents**:
+    *   `entity/`: SeaORM entities.
+    *   `bus/`: [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9) (tokio::broadcast / MPSC).
+    *   `traits/`: `PluginHost`, [ScriptEngine](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-script/src/lib.rs#5-10) traits.
+    *   `service/`: `DeviceService`, `AlarmService`.
+*   **Dependencies**: `tokio`, `sea-orm`, `tracing`, `flux-types`.
+
+### 3. `flux-plugin` (Library)
+*   **Purpose**: Wasm Runtime isolation layer.
+*   **Contents**:
+    *   [PluginManager](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-plugin/src/manager.rs#7-14): Loads internal plugins.
+    *   [WasmHost](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-plugin/src/wasm_host.rs#5-8): Wraps `wasmtime::Engine`.
+    *   [memory.rs](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-plugin/src/memory.rs): Efficient memory copying between Host/Guest.
+*   **Dependencies**: `wasmtime`, `anyhow`, `flux-types`.
+
+### 4. `flux-server` (Binary)
+*   **Purpose**: wiring and execution.
+*   **Contents**:
+    *   [main.rs](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-server/src/main.rs): Setup logging, connection pools, start actors.
+    *   `api/`: Axum handlers (REST/WebSocket).
+    *   `api/`: Axum handlers (REST/WebSocket).
+    *   `mqtt/`: MQTT Broker (librumqttd) & Bridge.
+*   **Dependencies**: `axum`, `tokio`, `clap`, `flux-core`, `flux-plugin`, `flux-script`, `rumqttd`.
+
+## Phase 7: Embedded MQTT Broker (rumqttd)
+*   **Architecture**:
+    *   Use `librumqttd` to run an MQTT broker *inside* the `flux-server` process.
+    *   Config: Listen on port 1883 (TCP).
+    *   **Bridge Layer**:
+        *   A background task that subscribes to all topics (`#`) on the internal broker.
+        *   When an MQTT message is received -> Convert to `flux_types::Message` -> Publish to [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9).
+        *   When [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9) receives a message -> (Optional) Publish back to MQTT topics.
+*   **Benefits**:
+    *   Zero deployment: No need for external Mosquitto/EMQX.
+    *   High performance: Direct memory access for bridging (if using internal channel).
+*   **Implementation Steps**:
+    1.  Add `rumqttd` dependency.
+    2.  Create `flux-server/src/mqtt.rs` module.
+    3.  Define `start_broker` function that takes [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9) reference.
+    4.  Spawn broker in a separate thread/task.
+    5.  Implement the loop to bridge `Broker -> EventBus`.
+
+### 5. `flux-plugin-sdk` (Library)
+*   **Purpose**: Minimal dependency crate for Wasm developers.
+*   **Contents**:
+    *   Helper macros (`export_plugin!`).
+    *   Re-exports `flux-types`.
+*   **Target**: `wasm32-unknown-unknown`.
+
+## Verification Plan
+Since this is a structural setup, verification involves creating the structure and ensuring it compiles.
+
+### Automated Tests
+1.  **Workspace Compile**: Run `cargo build` to ensure all crates link correctly.
+2.  **Plugin Test**:
+    *   Create a dummy `modbus` plugin using `flux-plugin-sdk`.
+    *   Compile it to wasm.
+    *   Run a test in `flux-server` that loads this wasm and executes a function.
+3.  **Script Test**:
+    *   Run a test in `flux-script` that evaluates a simple Rhai script.
+
+### Manual Verification
+*   Inspect directory tree to match the design.
+*   Check circular dependencies (should be none).

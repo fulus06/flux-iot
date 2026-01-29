@@ -1,0 +1,6 @@
+{
+  "artifactType": "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
+  "summary": "Detailed plan for MQTT Authentication including DB schema changes and Authenticator trait design.",
+  "updatedAt": "2026-01-29T11:52:22.405418Z",
+  "version": "2"
+}

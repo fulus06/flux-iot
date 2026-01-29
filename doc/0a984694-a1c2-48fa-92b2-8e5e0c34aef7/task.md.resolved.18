@@ -1,0 +1,69 @@
+# FLUX IOT Project Design & Implementation Roadmap
+
+## Phase 0: Project Setup
+- [x] Design Project Structure <!-- id: 0 -->
+    - [x] Analyze requirements from docs <!-- id: 1 -->
+    - [x] Define Rust Workspace structure <!-- id: 2 -->
+    - [x] Define Crate boundaries <!-- id: 3 -->
+- [x] Implement Project Skeleton <!-- id: 4 -->
+    - [x] Create Cargo Workspace <!-- id: 5 -->
+    - [x] Create Core Crates (core, server, plugin-api, etc.) <!-- id: 6 -->
+    - [x] Define shared Types/Traits <!-- id: 7 -->
+- [x] Document Architecture <!-- id: 8 -->
+    - [x] Create ARCHITECTURE.md detailed guide <!-- id: 9 -->
+
+## Phase 1: Core Foundation & Types
+- [x] **Data Types Definition** (`flux-types`) <!-- id: 10 -->
+    - [x] Define [Message](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/message.rs#5-11) struct (Standard Event) <!-- id: 11 -->
+    - [x] Define [DeviceData](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/device.rs#5-10) and `Command` structs <!-- id: 12 -->
+    - [x] Fix Wasm compatibility for `flux-types` (handle `uuid`/`getrandom` issues) <!-- id: 13 -->
+- [x] **Event Bus** (`flux-core`) <!-- id: 14 -->
+    - [x] Implement async [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9) using tokio broadcast/mpsc <!-- id: 15 -->
+    - [x] Define Subscriber/Publisher traits <!-- id: 16 -->
+
+## Phase 2: Plugin System (Wasmtime)
+- [x] **Plugin Host Implementation** (`flux-plugin`) <!-- id: 17 -->
+    - [x] Configure Wasmtime Engine (Enable Epoch interruption for safety) <!-- id: 18 -->
+    - [x] Implement Memory Bridge (Shared Memory for passing strings/bytes) <!-- id: 19 -->
+    - [x] Implement [PluginManager](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-plugin/src/manager.rs#7-14) to load/unload [.wasm](file:///Volumes/fushilu/workspace/flux-iot/plugins/dummy_plugin/target/wasm32-unknown-unknown/debug/dummy_plugin.wasm) files <!-- id: 20 -->
+- [x] **Plugin SDK** (`flux-plugin-sdk`) <!-- id: 21 -->
+    - [x] Create convenience macros (`export_plugin!`) <!-- id: 22 -->
+    - [x] Example: Implement a `dummy_plugin` for testing <!-- id: 23 -->
+
+## Phase 3: Script Engine (Rhai)
+- [x] **Script Engine Implementation** (`flux-script`) <!-- id: 24 -->
+    - [x] Configure `rhai::Engine` with safety limits (max operations) <!-- id: 25 -->
+    - [x] Register `flux-types` into Rhai Scope <!-- id: 26 -->
+    - [x] Implement `ScriptService` for hot-reloading scripts <!-- id: 27 -->
+
+## Phase 4: Server Integration & API
+- [x] **Server Application** (`flux-server`) <!-- id: 28 -->
+    - [x] Wire up EventBus, PluginManager, and ScriptEngine <!-- id: 29 -->
+    - [x] Implement Configuration Loading ([config.toml](file:///Volumes/fushilu/workspace/flux-iot/config.toml)) <!-- id: 30 -->
+    - [x] Basic HTTP API (Axum) for status checks <!-- id: 31 -->
+
+## Phase 5: Functional Implementation (Next Steps)
+- [x] **Plugin Auto-Loading** <!-- id: 32 -->
+    - [x] Create `plugins/` directory support in Server <!-- id: 33 -->
+    - [x] Auto-load [.wasm](file:///Volumes/fushilu/workspace/flux-iot/plugins/dummy_plugin/target/wasm32-unknown-unknown/debug/dummy_plugin.wasm) files on startup <!-- id: 34 -->
+- [x] **Device Data API** <!-- id: 35 -->
+    - [x] Implement `POST /api/v1/event` endpoint <!-- id: 36 -->
+    - [x] Wire API -> EventBus -> Script Engine <!-- id: 37 -->
+- [x] **Rule Engine Logic** <!-- id: 38 -->
+    - [x] Create `RuleWorker` that listens to [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9) <!-- id: 39 -->
+    - [x] Execute Rhai scripts against incoming data <!-- id: 40 -->
+
+## Phase 6: Persistence & Dynamic Rules (Next Priority)
+- [x] **Database Integration (Sea-ORM)** <!-- id: 41 -->
+    - [x] Define Entities (`devices`, `events`, `rules`) <!-- id: 42 -->
+    - [x] Setup Database Connection & Migrations <!-- id: 43 -->
+- [/] **Dynamic Rule Management** <!-- id: 44 -->
+    - [ ] Load rules from Database (replace hardcoded implementation) <!-- id: 45 -->
+    - [ ] Implement CRUD APIs for Rules (`POST /api/v1/rules`) <!-- id: 46 -->
+- [x] **Data Storage** <!-- id: 47 -->
+    - [x] Asynchronously save [Message](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-types/src/message.rs#5-11) to `events` table <!-- id: 48 -->
+
+## Phase 7: Protocol & Connectivity
+- [ ] **MQTT Integration** <!-- id: 49 -->
+    - [ ] Embed MQTT Broker or Client <!-- id: 50 -->
+    - [ ] Bridge subscriber to [EventBus](file:///Volumes/fushilu/workspace/flux-iot/crates/flux-core/src/bus.rs#6-9) <!-- id: 51 -->

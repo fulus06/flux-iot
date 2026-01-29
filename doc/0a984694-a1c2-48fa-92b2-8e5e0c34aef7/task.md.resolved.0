@@ -1,0 +1,12 @@
+# FLUX IOT Project Design
+
+- [ ] Design Project Structure <!-- id: 0 -->
+    - [ ] Analyze requirements from docs <!-- id: 1 -->
+    - [ ] Define Rust Workspace structure <!-- id: 2 -->
+    - [ ] Define Crate boundaries <!-- id: 3 -->
+- [ ] Implement Project Skeleton <!-- id: 4 -->
+    - [ ] Create Cargo Workspace <!-- id: 5 -->
+    - [ ] Create Core Crates (core, server, plugin-api, etc.) <!-- id: 6 -->
+    - [ ] Define shared Types/Traits <!-- id: 7 -->
+- [ ] Document Architecture <!-- id: 8 -->
+    - [ ] Create ARCHITECTURE.md detailed guide <!-- id: 9 -->
