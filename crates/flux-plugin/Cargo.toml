@@ -1,0 +1,10 @@
+[package]
+name = "flux-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flux-types = { path = "../flux-types" }
+wasmtime = "14.0" # or appropriate version
+anyhow = "1.0"
+log = "0.4"

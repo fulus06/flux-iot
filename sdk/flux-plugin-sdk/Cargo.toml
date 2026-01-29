@@ -1,0 +1,7 @@
+[package]
+name = "flux-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flux-types = { path = "../../crates/flux-types" }
