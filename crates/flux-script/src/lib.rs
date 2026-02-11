@@ -1,5 +1,5 @@
-use rhai::{Engine, Scope, AST};
 use flux_types::message::Message;
+use rhai::{Engine, Scope, AST};
 use std::sync::{Arc, RwLock};
 
 pub struct ScriptEngine {
@@ -21,14 +21,12 @@ impl ScriptEngine {
     pub fn new() -> Self {
         let mut engine = Engine::new();
         let state_store = Arc::new(RwLock::new(std::collections::HashMap::new()));
-        
+
         // Safety: Limit max operations
         engine.set_max_operations(100_000);
-        
+
         // Register time function
-        engine.register_fn("now_ms", || {
-            chrono::Utc::now().timestamp_millis()
-        });
+        engine.register_fn("now_ms", || chrono::Utc::now().timestamp_millis());
 
         // Register state functions via closures capturing state_store
         let store = state_store.clone();
@@ -49,28 +47,34 @@ impl ScriptEngine {
             match store.write() {
                 Ok(mut write) => {
                     write.insert(key.to_string(), value);
-                },
+                }
                 Err(_) => {
                     tracing::error!("Failed to acquire write lock for state_set");
                 }
             }
         });
-        
+
         // Redirect print() to tracing::info!
         engine.on_print(|x| {
             tracing::info!("SCRIPT: {}", x);
         });
-        
+
         Self {
             engine,
             script_cache: RwLock::new(std::collections::HashMap::new()),
             state_store,
         }
     }
-    
-    pub fn compile_script(&self, script_id: &str, script: &str) -> Result<(), Box<dyn std::error::Error>> {
+
+    pub fn compile_script(
+        &self,
+        script_id: &str,
+        script: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let ast = self.engine.compile(script)?;
-        let mut cache = self.script_cache.write()
+        let mut cache = self
+            .script_cache
+            .write()
             .map_err(|e| format!("Failed to acquire write lock: {}", e))?;
         cache.insert(script_id.to_string(), ast);
         Ok(())
@@ -78,20 +82,26 @@ impl ScriptEngine {
 
     /// Execute a script with a Message payload.
     /// Returns true if the script evaluates to true (useful for rules).
-    pub fn eval_message(&self, script_id: &str, msg: &Message) -> Result<bool, Box<dyn std::error::Error>> {
-        let cache = self.script_cache.read()
+    pub fn eval_message(
+        &self,
+        script_id: &str,
+        msg: &Message,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let cache = self
+            .script_cache
+            .read()
             .map_err(|e| format!("Failed to acquire read lock: {}", e))?;
         let ast = cache.get(script_id).ok_or("Script not found")?;
 
         let mut scope = Scope::new();
-        
+
         // Inject data into scope
         // Converting to rhai::Map (which is BTreeMap<SmartString, Dynamic>)
         let payload_map = rhai::serde::to_dynamic(&msg.payload)?;
         scope.push("payload", payload_map);
         scope.push("topic", msg.topic.clone());
         scope.push("device_id", msg.id.to_string());
-        
+
         let result: bool = self.engine.eval_ast_with_scope(&mut scope, ast)?;
         Ok(result)
     }
@@ -110,7 +120,7 @@ impl ScriptEngine {
         match self.script_cache.write() {
             Ok(mut cache) => {
                 cache.remove(id);
-            },
+            }
             Err(e) => {
                 tracing::error!("Failed to acquire write lock in remove_script: {}", e);
             }

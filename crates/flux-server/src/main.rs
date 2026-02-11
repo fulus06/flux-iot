@@ -1,8 +1,8 @@
 use clap::Parser;
 use config::Config;
-use std::sync::Arc;
+use flux_core::entity::{devices, prelude::*, rules};
 use sea_orm::{Database, PaginatorTrait}; // SeaORM
-use flux_core::entity::{prelude::*, rules, devices}; // Entities
+use std::sync::Arc; // Entities
 
 // Import our core crates
 use flux_core::bus::EventBus;
@@ -10,13 +10,13 @@ use flux_plugin::PluginManager;
 use flux_script::ScriptEngine;
 
 // 使用 lib.rs 中定义的公共类型
-use flux_server::{AppState, AppConfig};
+use flux_server::{AppConfig, AppState};
 
 mod api;
-mod worker;
-mod storage;
 mod auth;
 mod metrics;
+mod storage;
+mod worker;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("RUST_LOG", "info,flux_server=debug");
     }
     tracing_subscriber::fmt::init();
-    
+
     let args = Args::parse();
     tracing::info!("Starting FLUX IOT Server with config: {}", args.config);
 
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let settings = Config::builder()
         .add_source(config::File::with_name(&args.config))
         .build()?;
-    
+
     let app_config: AppConfig = settings.try_deserialize()?;
     tracing::info!("Config loaded: {:?}", app_config);
 
@@ -51,22 +51,31 @@ async fn main() -> anyhow::Result<()> {
     // Connect to Database
     tracing::info!("Connecting to database: {}", app_config.database.url);
     let db = Database::connect(&app_config.database.url).await?;
-    
+
     // Create Tables (Simple Migration for MVP)
-    use sea_orm::{Schema, ConnectionTrait};
+    use sea_orm::{ConnectionTrait, Schema};
     let backend = db.get_database_backend();
     let schema = Schema::new(backend);
-    
-    let stmt = schema.create_table_from_entity(Rules).if_not_exists().to_owned();
+
+    let stmt = schema
+        .create_table_from_entity(Rules)
+        .if_not_exists()
+        .to_owned();
     db.execute(backend.build(&stmt)).await?;
-    
-    let stmt = schema.create_table_from_entity(Events).if_not_exists().to_owned();
+
+    let stmt = schema
+        .create_table_from_entity(Events)
+        .if_not_exists()
+        .to_owned();
     db.execute(backend.build(&stmt)).await?;
-    
-    let stmt = schema.create_table_from_entity(Devices).if_not_exists().to_owned();
+
+    let stmt = schema
+        .create_table_from_entity(Devices)
+        .if_not_exists()
+        .to_owned();
     db.execute(backend.build(&stmt)).await?;
     tracing::info!("Database initialized and migrations applied.");
-    
+
     // Seed Test Device
     let device_count = devices::Entity::find().count(&db).await?;
     if device_count == 0 {
@@ -79,9 +88,9 @@ async fn main() -> anyhow::Result<()> {
         };
         device.insert(&db).await?;
     }
-    
+
     // Seed Default Rule
-    use sea_orm::{EntityTrait, Set, ActiveModelTrait};
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
     let rule_count = rules::Entity::find().count(&db).await?;
     if rule_count == 0 {
         tracing::info!("Seeding default rule...");
@@ -93,19 +102,20 @@ async fn main() -> anyhow::Result<()> {
                     return true;
                 }
                 return false;
-            "#.to_owned()),
+            "#
+            .to_owned()),
             active: Set(true),
             created_at: Set(chrono::Utc::now().timestamp_millis()),
             ..Default::default() // Let DB handle ID if auto-increment (sqlite rowid)
         };
         rule.insert(&db).await?;
     }
-    
+
     // Load Plugins
     // TODO: move to a proper loader service
     let plugin_dir = &app_config.plugins.directory;
     tracing::info!("Loading plugins from: {}", plugin_dir);
-    
+
     if let Ok(entries) = std::fs::read_dir(plugin_dir) {
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
@@ -139,19 +149,19 @@ async fn main() -> anyhow::Result<()> {
         db: db.clone(),
         config: app_config.clone(),
     });
-    
+
     // 3. Initialize Metrics Exporter
     let metrics_addr = format!("{}:9090", app_config.server.host).parse()?;
     metrics::init_metrics(metrics_addr)?;
-    
+
     // 设置初始指标值
     metrics::set_eventbus_capacity(app_config.eventbus.capacity);
     metrics::set_active_rules(script_engine.get_script_ids().len());
     metrics::set_database_connections(1);
-    
+
     // 4. Start API Server (Axum)
     let app = api::create_router(state.clone());
-    
+
     // 5. Start Rule Worker
     let worker_state = state.clone();
     tokio::spawn(async move {
@@ -171,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     tracing::info!("Listening on {}", addr);
-    
+
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
@@ -192,7 +202,7 @@ async fn shutdown_signal() {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut signal) => {
                 signal.recv().await;
-            },
+            }
             Err(e) => {
                 tracing::error!("Failed to install signal handler: {}", e);
             }

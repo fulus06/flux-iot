@@ -1,17 +1,17 @@
+use crate::{metrics, AppState};
 use std::sync::Arc;
-use crate::{AppState, metrics};
 
 pub async fn start_rule_worker(state: Arc<AppState>) {
     tracing::info!("Starting Rule Worker...");
 
     // Load rules from DB
-    use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
     use flux_core::entity::rules;
-    
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
     match rules::Entity::find()
         .filter(rules::Column::Active.eq(true))
         .all(&state.db)
-        .await 
+        .await
     {
         Ok(active_rules) => {
             for rule in active_rules {
@@ -20,7 +20,7 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
                     tracing::error!("Failed to compile rule '{}': {}", rule.name, e);
                 }
             }
-        },
+        }
         Err(e) => tracing::error!("Failed to load rules from DB: {}", e),
     }
 
@@ -33,7 +33,7 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
                 // 记录事件接收
                 metrics::record_event_received();
                 tracing::debug!("Worker received message: {}", msg.id);
-                
+
                 // 🔥 阶段 1: 插件预处理
                 // 将消息序列化为 JSON 传递给插件
                 let msg_json = match serde_json::to_string(&msg) {
@@ -43,45 +43,61 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
                         continue;
                     }
                 };
-                
+
                 // 调用所有已加载的插件进行预处理
                 // 注意：这里简化处理，实际可以配置每个规则使用哪些插件
                 tracing::debug!("Calling plugins for message preprocessing");
-                
+
                 // 示例：调用 dummy_plugin 的 on_msg 函数
                 // 返回值是处理后的消息长度（示例插件的简单逻辑）
                 let plugin_start = std::time::Instant::now();
-                match state.plugin_manager.call_plugin("dummy_plugin", "on_msg", &msg_json) {
+                match state
+                    .plugin_manager
+                    .call_plugin("dummy_plugin", "on_msg", &msg_json)
+                {
                     Ok(result) => {
                         metrics::record_plugin_call();
                         metrics::record_plugin_duration(plugin_start.elapsed().as_secs_f64());
-                        tracing::info!("Plugin 'dummy_plugin' processed message, result: {}", result);
+                        tracing::info!(
+                            "Plugin 'dummy_plugin' processed message, result: {}",
+                            result
+                        );
                         // 实际应用中，插件可能返回修改后的 JSON，这里简化处理
-                    },
+                    }
                     Err(e) => {
                         // 插件失败不应该阻止规则执行
                         metrics::record_plugin_failure();
-                        tracing::warn!("Plugin 'dummy_plugin' failed: {}, continuing with original message", e);
+                        tracing::warn!(
+                            "Plugin 'dummy_plugin' failed: {}, continuing with original message",
+                            e
+                        );
                     }
                 }
-                
+
                 // 🔥 阶段 2: 规则引擎执行
                 // 注意：这里使用原始消息，实际应用中应该使用插件处理后的消息
                 let script_ids = state.script_engine.get_script_ids();
                 for script_id in script_ids {
                     metrics::record_rule_executed();
-                    
+
                     match state.script_engine.eval_message(&script_id, &msg) {
                         Ok(triggered) => {
-                             if triggered {
-                                 metrics::record_rule_triggered();
-                                 tracing::warn!("!!! RULE TRIGGERED: {} (msg {}) !!!", script_id, msg.id);
-                                 
-                                 // 🔥 阶段 3: 规则触发后的动作插件（可选）
-                                 // 这里可以调用动作插件，例如发送通知、控制设备等
-                                 tracing::info!("Rule '{}' triggered, executing actions...", script_id);
-                             }
-                        },
+                            if triggered {
+                                metrics::record_rule_triggered();
+                                tracing::warn!(
+                                    "!!! RULE TRIGGERED: {} (msg {}) !!!",
+                                    script_id,
+                                    msg.id
+                                );
+
+                                // 🔥 阶段 3: 规则触发后的动作插件（可选）
+                                // 这里可以调用动作插件，例如发送通知、控制设备等
+                                tracing::info!(
+                                    "Rule '{}' triggered, executing actions...",
+                                    script_id
+                                );
+                            }
+                        }
                         Err(e) => {
                             metrics::record_rule_failed();
                             tracing::error!("Failed to execute rule {}: {}", script_id, e);

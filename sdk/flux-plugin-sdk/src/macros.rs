@@ -19,9 +19,9 @@ macro_rules! export_plugin_alloc {
 }
 
 /// Helper to read a String passed by the Host.
-/// 
+///
 /// # Safety
-/// 
+///
 /// This function is unsafe because it dereferences raw pointers.
 /// The caller must ensure that:
 /// - `ptr` points to valid memory allocated by the Host

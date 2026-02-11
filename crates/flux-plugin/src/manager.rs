@@ -1,106 +1,258 @@
-use crate::wasm_host::WasmHost;
-use anyhow::{Result, Context, anyhow};
+use crate::wasm_host::{WasmHost, WasmResourceLimiter};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
-use std::sync::RwLock;
-use wasmtime::Store;
+use std::sync::{Arc, RwLock};
+use wasmtime::{Module, Store};
+
+/// 插件实例池配置
+const DEFAULT_POOL_SIZE: usize = 4; // 每个插件默认保持4个实例
 
 pub struct PluginManager {
     host: WasmHost,
-    // Store instances for each plugin.
-    // In a real scenario, we might want to recycle instances or create them on demand.
-    // For now, we keep one instance per plugin for simplicity.
-    instances: RwLock<HashMap<String, PluginInstance>>,
+    // 存储每个插件的模块和实例池
+    plugins: RwLock<HashMap<String, PluginPool>>,
+    pool_size: usize,
+}
+
+/// 单个插件的实例池
+struct PluginPool {
+    module: Arc<Module>,
+    // 可用实例队列（使用 Vec 作为简单的池）
+    available: Vec<PluginInstance>,
+    // 实例池大小限制
+    max_size: usize,
 }
 
 struct PluginInstance {
-    store: Store<()>,
+    store: Store<WasmResourceLimiter>,
     instance: wasmtime::Instance,
 }
 
 impl PluginManager {
     pub fn new() -> Result<Self> {
+        Self::with_pool_size(DEFAULT_POOL_SIZE)
+    }
+
+    pub fn with_pool_size(pool_size: usize) -> Result<Self> {
         Ok(Self {
             host: WasmHost::new()?,
-            instances: RwLock::new(HashMap::new()),
+            plugins: RwLock::new(HashMap::new()),
+            pool_size,
         })
     }
 
     pub fn load_plugin(&self, plugin_id: &str, wasm_bytes: &[u8]) -> Result<()> {
-        let module = self.host.load_module(wasm_bytes)?;
+        let module = Arc::new(self.host.load_module(wasm_bytes)?);
+
+        // 预创建初始实例（懒加载策略：先创建1个，按需增长）
         let linker = self.host.create_linker();
         let mut store = self.host.create_store();
-        
-        let instance = linker.instantiate(&mut store, &module)
+        let instance = linker
+            .instantiate(&mut store, &module)
             .context("Failed to instantiate plugin")?;
-        
-        let plugin_instance = PluginInstance {
-            store,
-            instance,
+
+        let plugin_instance = PluginInstance { store, instance };
+
+        let pool = PluginPool {
+            module,
+            available: vec![plugin_instance],
+            max_size: self.pool_size,
         };
-        
-        // 获取写锁，如果锁被污染则返回错误
-        let mut instances = self.instances.write()
+
+        let mut plugins = self
+            .plugins
+            .write()
             .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
-        instances.insert(plugin_id.to_string(), plugin_instance);
+        plugins.insert(plugin_id.to_string(), pool);
+
+        tracing::debug!(
+            "Loaded plugin '{}' with pool size {}",
+            plugin_id,
+            self.pool_size
+        );
         Ok(())
     }
 
     /// Call a function in the plugin.
     /// Example: "on_msg(ptr, len) -> int"
-    pub fn call_plugin(&self, plugin_id: &str, function_name: &str, input_data: &str) -> Result<i32> {
-        let mut map = self.instances.write()
+    /// 使用实例池策略：从池中获取实例，使用后归还
+    pub fn call_plugin(
+        &self,
+        plugin_id: &str,
+        function_name: &str,
+        input_data: &str,
+    ) -> Result<i32> {
+        // 1. 从池中获取或创建实例
+        let mut instance = self.acquire_instance(plugin_id)?;
+
+        // 2. 执行插件调用
+        let result = self.execute_plugin_call(&mut instance, function_name, input_data);
+
+        // 3. 归还实例到池中（无论成功失败）
+        self.release_instance(plugin_id, instance)?;
+
+        result
+    }
+
+    /// 从实例池获取一个可用实例
+    fn acquire_instance(&self, plugin_id: &str) -> Result<PluginInstance> {
+        let mut plugins = self
+            .plugins
+            .write()
             .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
-        let plugin = map.get_mut(plugin_id)
+
+        let pool = plugins
+            .get_mut(plugin_id)
             .ok_or_else(|| anyhow!("Plugin not found: {}", plugin_id))?;
-            
+
+        // 尝试从池中获取实例
+        if let Some(instance) = pool.available.pop() {
+            tracing::trace!(
+                "Reusing instance from pool for plugin '{}' (pool hit)",
+                plugin_id
+            );
+            // Metrics: 池命中
+            return Ok(instance);
+        }
+
+        // 池为空，创建新实例（如果未达到上限）
+        tracing::debug!(
+            "Creating new instance for plugin '{}' (pool miss)",
+            plugin_id
+        );
+        // Metrics: 池未命中
+
+        if pool.available.len() < pool.max_size {
+            let linker = self.host.create_linker();
+            let mut store = self.host.create_store();
+            let instance = linker
+                .instantiate(&mut store, &pool.module)
+                .context("Failed to instantiate plugin from pool")?;
+
+            Ok(PluginInstance { store, instance })
+        } else {
+            // 池已满且无可用实例，创建临时实例
+            tracing::warn!(
+                "Plugin '{}' pool exhausted, creating temporary instance",
+                plugin_id
+            );
+            let linker = self.host.create_linker();
+            let mut store = self.host.create_store();
+            let instance = linker
+                .instantiate(&mut store, &pool.module)
+                .context("Failed to instantiate temporary plugin instance")?;
+
+            Ok(PluginInstance { store, instance })
+        }
+    }
+
+    /// 归还实例到池中
+    fn release_instance(&self, plugin_id: &str, instance: PluginInstance) -> Result<()> {
+        let mut plugins = self
+            .plugins
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
+
+        if let Some(pool) = plugins.get_mut(plugin_id) {
+            // 只有池未满时才归还
+            if pool.available.len() < pool.max_size {
+                pool.available.push(instance);
+                tracing::trace!("Returned instance to pool for plugin '{}'", plugin_id);
+            } else {
+                // 池已满，丢弃实例（自动清理）
+                tracing::trace!("Pool full, discarding instance for plugin '{}'", plugin_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 执行实际的插件调用
+    fn execute_plugin_call(
+        &self,
+        plugin: &mut PluginInstance,
+        function_name: &str,
+        input_data: &str,
+    ) -> Result<i32> {
         let instance = plugin.instance;
-        let mut store = &mut plugin.store;
+        let store = &mut plugin.store;
 
         // 1. Get exports
-        let alloc_fn = instance.get_typed_func::<i32, i32>(&mut store, "alloc")
+        let alloc_fn = instance
+            .get_typed_func::<i32, i32>(&mut *store, "alloc")
             .context("Plugin must export 'alloc' function")?;
-        
-        let dealloc_fn = instance.get_typed_func::<(i32, i32), ()>(&mut store, "dealloc")
+
+        let dealloc_fn = instance
+            .get_typed_func::<(i32, i32), ()>(&mut *store, "dealloc")
             .context("Plugin must export 'dealloc' function")?;
-        
-        let target_fn = instance.get_typed_func::<(i32, i32), i32>(&mut store, function_name)
+
+        let target_fn = instance
+            .get_typed_func::<(i32, i32), i32>(&mut *store, function_name)
             .context(format!("Plugin must export '{}' function", function_name))?;
-            
-        let memory = instance.get_memory(&mut store, "memory")
+
+        let memory = instance
+            .get_memory(&mut *store, "memory")
             .context("Plugin must export 'memory'")?;
 
         // 2. Write input to Wasm memory
         let bytes = input_data.as_bytes();
         let len = bytes.len() as i32;
-        let ptr = alloc_fn.call(&mut store, len)?;
-        
+        let ptr = alloc_fn.call(&mut *store, len)?;
+
         // 确保即使写入失败也能释放内存
-        if let Err(e) = memory.write(&mut store, ptr as usize, bytes) {
-            let _ = dealloc_fn.call(&mut store, (ptr, len));
+        if let Err(e) = memory.write(&mut *store, ptr as usize, bytes) {
+            let _ = dealloc_fn.call(&mut *store, (ptr, len));
             return Err(e.into());
         }
-        
+
         // 3. Call the function
-        let result = target_fn.call(&mut store, (ptr, len));
-        
+        let result = target_fn.call(&mut *store, (ptr, len));
+
         // 4. 释放 Wasm 内存（无论函数调用成功与否）
-        // Safety: 必须在使用完内存后立即释放，防止内存泄漏
-        let dealloc_result = dealloc_fn.call(&mut store, (ptr, len));
-        
+        let dealloc_result = dealloc_fn.call(&mut *store, (ptr, len));
+
         // 优先返回业务逻辑错误，但记录 dealloc 失败
         match (result, dealloc_result) {
             (Ok(r), Ok(())) => Ok(r),
             (Ok(_), Err(e)) => {
                 tracing::error!("Failed to deallocate Wasm memory: {}", e);
                 Err(anyhow!("Memory deallocation failed: {}", e))
-            },
+            }
             (Err(e), Ok(())) => Err(e),
             (Err(e1), Err(e2)) => {
                 tracing::error!("Failed to deallocate Wasm memory: {}", e2);
-                Err(anyhow!("Plugin call failed: {}, dealloc also failed: {}", e1, e2))
+                Err(anyhow!(
+                    "Plugin call failed: {}, dealloc also failed: {}",
+                    e1,
+                    e2
+                ))
             }
         }
     }
+
+    /// 获取插件池统计信息
+    pub fn get_pool_stats(&self, plugin_id: &str) -> Result<PoolStats> {
+        let plugins = self
+            .plugins
+            .read()
+            .map_err(|e| anyhow!("Failed to acquire read lock: {}", e))?;
+
+        let pool = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow!("Plugin not found: {}", plugin_id))?;
+
+        Ok(PoolStats {
+            available: pool.available.len(),
+            max_size: pool.max_size,
+        })
+    }
+}
+
+/// 插件池统计信息
+#[derive(Debug, Clone)]
+pub struct PoolStats {
+    pub available: usize,
+    pub max_size: usize,
 }
 
 #[cfg(test)]
@@ -112,7 +264,7 @@ mod tests {
         let plugin_path = std::env::current_dir()?
             .join("plugins")
             .join("dummy_plugin.wasm");
-        
+
         std::fs::read(&plugin_path)
             .context(format!("Failed to read test plugin from {:?}", plugin_path))
     }
@@ -163,7 +315,7 @@ mod tests {
         // 调用插件的 on_msg 函数
         let input = r#"{"topic":"test","payload":{"value":42}}"#;
         let result = manager.call_plugin("dummy", "on_msg", input);
-        
+
         assert!(result.is_ok());
         // dummy_plugin 返回输入字符串的长度
         assert_eq!(result.unwrap(), input.len() as i32);
@@ -230,7 +382,7 @@ mod tests {
         // 创建一个较大的输入（10KB）
         let large_input = "x".repeat(10240);
         let result = manager.call_plugin("dummy", "on_msg", &large_input);
-        
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 10240);
     }
@@ -270,7 +422,7 @@ mod tests {
 
         // 加载插件
         manager.load_plugin("reload_test", &wasm_bytes).unwrap();
-        
+
         // 重新加载同一个插件（应该覆盖）
         let result = manager.load_plugin("reload_test", &wasm_bytes);
         assert!(result.is_ok());

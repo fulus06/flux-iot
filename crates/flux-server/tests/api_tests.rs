@@ -1,15 +1,15 @@
-use flux_server::{AppState, config::AppConfig};
-use flux_core::bus::EventBus;
-use flux_plugin::manager::PluginManager;
-use flux_script::ScriptEngine;
-use sea_orm::{Database, DatabaseConnection, Schema, ConnectionTrait};
-use std::sync::Arc;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use tower::ServiceExt;
+use flux_core::bus::EventBus;
+use flux_plugin::manager::PluginManager;
+use flux_script::ScriptEngine;
+use flux_server::{config::AppConfig, AppState};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Schema};
 use serde_json::json;
+use std::sync::Arc;
+use tower::ServiceExt;
 
 async fn create_test_db() -> DatabaseConnection {
     Database::connect("sqlite::memory:")
@@ -22,13 +22,14 @@ async fn create_test_state() -> Arc<AppState> {
     let plugin_manager = Arc::new(PluginManager::new().unwrap());
     let script_engine = Arc::new(ScriptEngine::new());
     let db = create_test_db().await;
-    
+
     // 创建表结构
     use flux_core::entity::rules;
     let schema = Schema::new(sea_orm::DatabaseBackend::Sqlite);
     let stmt = schema.create_table_from_entity(rules::Entity);
     let builder = db.get_database_backend();
-    let _result = db.execute(builder.build(&stmt))
+    let _result = db
+        .execute(builder.build(&stmt))
         .await
         .expect("Failed to create table");
 
@@ -77,13 +78,10 @@ async fn test_accept_event() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // 验证事件是否发布到 EventBus
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(100),
-        rx.recv()
-    )
-    .await
-    .expect("Timeout")
-    .expect("Failed to receive");
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
+        .await
+        .expect("Timeout")
+        .expect("Failed to receive");
 
     assert_eq!(msg.topic, "test/sensor");
     assert_eq!(msg.payload["temperature"], 25.5);
@@ -103,11 +101,9 @@ async fn test_list_rules_empty() {
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = hyper::body::to_bytes(response.into_body())
-        .await
-        .unwrap();
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(json["rules"].is_array());
     assert_eq!(json["rules"].as_array().unwrap().len(), 0);
 }

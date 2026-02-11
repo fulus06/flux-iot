@@ -1,0 +1,34 @@
+#!/bin/bash
+# FLUX IOT Pre-push Hook
+# 运行完整的测试套件和构建检查
+
+set -e
+
+echo "🚀 Running pre-push checks..."
+
+# 1. 运行完整测试（包括集成测试）
+echo "🧪 Running full test suite..."
+if ! cargo test --workspace; then
+    echo "❌ Test suite failed!"
+    exit 1
+fi
+echo "✅ Test suite passed"
+
+# 2. 检查 release 构建
+echo "🏗️  Checking release build..."
+if ! cargo build --release --workspace; then
+    echo "❌ Release build failed!"
+    exit 1
+fi
+echo "✅ Release build OK"
+
+# 3. 运行 cargo check
+echo "🔍 Running cargo check..."
+if ! cargo check --workspace; then
+    echo "❌ Cargo check failed!"
+    exit 1
+fi
+echo "✅ Cargo check OK"
+
+echo "✨ All pre-push checks passed!"
+exit 0

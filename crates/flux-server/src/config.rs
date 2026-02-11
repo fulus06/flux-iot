@@ -41,6 +41,26 @@ pub struct MqttConfig {
     pub port: u16,
     #[serde(default = "default_mqtt_workers")]
     pub workers: usize,
+    
+    /// 启用 TLS/SSL
+    #[serde(default)]
+    pub enable_tls: bool,
+    
+    /// TLS 证书文件路径
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    
+    /// TLS 私钥文件路径
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    
+    /// 启用客户端认证
+    #[serde(default)]
+    pub tls_client_auth: bool,
+    
+    /// CA 证书路径（用于客户端认证）
+    #[serde(default)]
+    pub tls_ca_cert_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,6 +100,11 @@ impl Default for MqttConfig {
         Self {
             port: default_mqtt_port(),
             workers: default_mqtt_workers(),
+            enable_tls: false,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_client_auth: false,
+            tls_ca_cert_path: None,
         }
     }
 }

@@ -1,0 +1,130 @@
+# Prometheus 告警规则
+groups:
+  # ========================================
+  # 服务可用性告警
+  # ========================================
+  - name: service_availability
+    interval: 30s
+    rules:
+      - alert: ServiceDown
+        expr: up{job="flux-iot"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "FLUX IOT 服务宕机"
+          description: "FLUX IOT 主服务已宕机超过 1 分钟"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 错误率过高"
+          description: "5xx 错误率超过 5%，当前值: {{ $value }}"
+
+  # ========================================
+  # 资源使用告警
+  # ========================================
+  - name: resource_usage
+    interval: 30s
+    rules:
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes{name="flux-iot"} / container_spec_memory_limit_bytes{name="flux-iot"}) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "内存使用率过高"
+          description: "内存使用率超过 85%，当前值: {{ $value | humanizePercentage }}"
+
+      - alert: HighCPUUsage
+        expr: (rate(container_cpu_usage_seconds_total{name="flux-iot"}[5m]) / container_spec_cpu_quota{name="flux-iot"}) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU 使用率过高"
+          description: "CPU 使用率超过 80%，当前值: {{ $value | humanizePercentage }}"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘空间不足"
+          description: "可用磁盘空间低于 10%"
+
+  # ========================================
+  # 数据库告警
+  # ========================================
+  - name: database
+    interval: 30s
+    rules:
+      - alert: PostgresDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL 数据库宕机"
+          description: "PostgreSQL 数据库已宕机超过 1 分钟"
+
+      - alert: TooManyConnections
+        expr: pg_stat_database_numbackends > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据库连接数过多"
+          description: "当前连接数: {{ $value }}"
+
+  # ========================================
+  # MQTT 告警
+  # ========================================
+  - name: mqtt
+    interval: 30s
+    rules:
+      - alert: HighMQTTLatency
+        expr: mqtt_message_latency_seconds > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MQTT 消息延迟过高"
+          description: "MQTT 消息延迟超过 1 秒，当前值: {{ $value }}s"
+
+      - alert: MQTTConnectionDrops
+        expr: rate(mqtt_connections_dropped_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MQTT 连接频繁断开"
+          description: "MQTT 连接断开速率: {{ $value }}/s"
+
+  # ========================================
+  # Wasm 插件告警
+  # ========================================
+  - name: wasm_plugins
+    interval: 30s
+    rules:
+      - alert: WasmMemoryLimitExceeded
+        expr: rate(wasm_memory_limit_exceeded_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Wasm 内存限制频繁触发"
+          description: "Wasm 插件内存限制触发频率: {{ $value }}/s"
+
+      - alert: WasmPluginLoadFailure
+        expr: rate(wasm_plugin_load_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Wasm 插件加载失败"
+          description: "Wasm 插件加载失败，请检查插件文件"
