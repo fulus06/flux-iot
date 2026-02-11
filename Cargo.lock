@@ -1086,6 +1086,7 @@ name = "flux-plugin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flux-core",
  "flux-types",
  "log",
  "tracing",

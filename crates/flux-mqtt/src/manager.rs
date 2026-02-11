@@ -55,6 +55,12 @@ pub struct MqttManager {
     sessions: Rc<RefCell<HashMap<String, SessionState>>>,
 }
 
+impl Default for MqttManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MqttManager {
     pub fn new() -> Self {
         Self {

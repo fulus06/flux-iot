@@ -1,4 +1,4 @@
-use anyhow::Result;
+use flux_core::error::Result;
 use wasmtime::{Caller, Config, Engine, Linker, Module, ResourceLimiter, Store};
 
 /// Wasm 资源限制配置
@@ -19,7 +19,7 @@ pub struct WasmResourceLimits {
 impl Default for WasmResourceLimits {
     fn default() -> Self {
         Self {
-            max_memory_bytes: 16 * 1024 * 1024,  // 16 MB
+            max_memory_bytes: 16 * 1024 * 1024, // 16 MB
             max_table_elements: 1000,
             max_instances: 10,
             max_tables: 1,
@@ -44,23 +44,37 @@ impl WasmResourceLimiter {
 }
 
 impl ResourceLimiter for WasmResourceLimiter {
-    fn memory_growing(&mut self, current: usize, desired: usize, _maximum: Option<usize>) -> anyhow::Result<bool> {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
         let allowed = desired <= self.max_memory_bytes;
         if !allowed {
             tracing::warn!(
                 "Wasm memory limit exceeded: current={}, desired={}, max={}",
-                current, desired, self.max_memory_bytes
+                current,
+                desired,
+                self.max_memory_bytes
             );
         }
         Ok(allowed)
     }
 
-    fn table_growing(&mut self, current: u32, desired: u32, _maximum: Option<u32>) -> anyhow::Result<bool> {
+    fn table_growing(
+        &mut self,
+        current: u32,
+        desired: u32,
+        _maximum: Option<u32>,
+    ) -> anyhow::Result<bool> {
         let allowed = desired <= self.max_table_elements;
         if !allowed {
             tracing::warn!(
                 "Wasm table limit exceeded: current={}, desired={}, max={}",
-                current, desired, self.max_table_elements
+                current,
+                desired,
+                self.max_table_elements
             );
         }
         Ok(allowed)
@@ -76,39 +90,42 @@ impl WasmHost {
     pub fn new() -> Result<Self> {
         Self::with_limits(WasmResourceLimits::default())
     }
-    
+
     pub fn with_limits(resource_limits: WasmResourceLimits) -> Result<Self> {
         let mut config = Config::new();
-        
+
         // 启用 epoch 中断（用于 CPU 时间限制）
         config.epoch_interruption(true);
-        
+
         // 启用资源限制
         config.consume_fuel(true);
-        
+
         // 优化级别
         config.cranelift_opt_level(wasmtime::OptLevel::Speed);
 
         let engine = Engine::new(&config)?;
-        Ok(Self { engine, resource_limits })
+        Ok(Self {
+            engine,
+            resource_limits,
+        })
     }
 
     pub fn load_module(&self, wasm_bytes: &[u8]) -> Result<Module> {
-        Module::new(&self.engine, wasm_bytes)
+        Ok(Module::new(&self.engine, wasm_bytes)?)
     }
 
     /// 创建带资源限制的 Store
     pub fn create_store(&self) -> Store<WasmResourceLimiter> {
         let limiter = WasmResourceLimiter::new(&self.resource_limits);
         let mut store = Store::new(&self.engine, limiter);
-        
+
         // 设置资源限制器
         store.limiter(|limiter| limiter);
-        
+
         // 注意：fuel 功能需要在编译时启用特定特性
         // 这里我们主要依赖 ResourceLimiter 来限制内存和表大小
         // CPU 时间限制可以通过 epoch interruption 实现
-        
+
         store
     }
 
@@ -147,7 +164,12 @@ impl WasmHost {
     }
 
     /// 处理来自 Wasm 插件的日志调用
-    fn handle_log(caller: &mut Caller<'_, WasmResourceLimiter>, ptr: i32, len: i32, level: tracing::Level) {
+    fn handle_log(
+        caller: &mut Caller<'_, WasmResourceLimiter>,
+        ptr: i32,
+        len: i32,
+        level: tracing::Level,
+    ) {
         const MAX_LOG_LEN: usize = 4096; // 防止超大日志
 
         // 1. 获取 Wasm 线性内存

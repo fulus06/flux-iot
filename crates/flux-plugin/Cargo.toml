@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+flux-core = { path = "../flux-core" }
 flux-types = { path = "../flux-types" }
 wasmtime = "14.0" # or appropriate version
 anyhow = "1.0"

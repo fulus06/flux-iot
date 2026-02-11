@@ -51,8 +51,7 @@ pub fn load_tls_config(config: &TlsConfig) -> Result<Arc<ServerConfig>> {
     let key_file = File::open(&config.key_path)
         .context(format!("Failed to open key file: {}", config.key_path))?;
     let mut key_reader = BufReader::new(key_file);
-    let mut keys = pkcs8_private_keys(&mut key_reader)
-        .context("Failed to parse private key")?;
+    let mut keys = pkcs8_private_keys(&mut key_reader).context("Failed to parse private key")?;
 
     if keys.is_empty() {
         anyhow::bail!("No private key found in {}", config.key_path);
@@ -79,7 +78,7 @@ pub fn load_tls_config(config: &TlsConfig) -> Result<Arc<ServerConfig>> {
             .with_single_cert(cert_chain, private_key)
             .context("Failed to build TLS config")?
     };
-    
+
     let mut tls_config = tls_config;
 
     // 5. 配置 ALPN 协议（MQTT）
@@ -98,11 +97,10 @@ fn load_client_auth_config(
     use rustls::RootCertStore;
 
     // 加载 CA 证书
-    let ca_file = File::open(ca_path)
-        .context(format!("Failed to open CA cert file: {}", ca_path))?;
+    let ca_file =
+        File::open(ca_path).context(format!("Failed to open CA cert file: {}", ca_path))?;
     let mut ca_reader = BufReader::new(ca_file);
-    let ca_certs = certs(&mut ca_reader)
-        .context("Failed to parse CA certificate")?;
+    let ca_certs = certs(&mut ca_reader).context("Failed to parse CA certificate")?;
 
     let mut root_store = RootCertStore::empty();
     for cert in ca_certs {
@@ -126,10 +124,7 @@ mod tests {
 
     #[test]
     fn test_tls_config_creation() {
-        let config = TlsConfig::new(
-            "cert.pem".to_string(),
-            "key.pem".to_string(),
-        );
+        let config = TlsConfig::new("cert.pem".to_string(), "key.pem".to_string());
         assert_eq!(config.cert_path, "cert.pem");
         assert_eq!(config.key_path, "key.pem");
         assert!(!config.client_auth);
@@ -137,11 +132,8 @@ mod tests {
 
     #[test]
     fn test_tls_config_with_client_auth() {
-        let config = TlsConfig::new(
-            "cert.pem".to_string(),
-            "key.pem".to_string(),
-        )
-        .with_client_auth("ca.pem".to_string());
+        let config = TlsConfig::new("cert.pem".to_string(), "key.pem".to_string())
+            .with_client_auth("ca.pem".to_string());
 
         assert!(config.client_auth);
         assert_eq!(config.ca_cert_path, Some("ca.pem".to_string()));

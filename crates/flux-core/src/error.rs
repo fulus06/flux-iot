@@ -41,10 +41,25 @@ pub enum FluxError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Wasm error: {0}")]
+    Wasm(String),
+
+    #[error("MQTT error: {0}")]
+    Mqtt(String),
+
+    #[error("TLS error: {0}")]
+    Tls(String),
 }
 
 /// Result 类型别名
 pub type Result<T> = std::result::Result<T, FluxError>;
+
+impl From<anyhow::Error> for FluxError {
+    fn from(err: anyhow::Error) -> Self {
+        FluxError::Internal(err.to_string())
+    }
+}
 
 impl<T> From<tokio::sync::broadcast::error::SendError<T>> for FluxError {
     fn from(err: tokio::sync::broadcast::error::SendError<T>) -> Self {
