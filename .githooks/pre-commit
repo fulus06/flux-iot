@@ -1,0 +1,37 @@
+#!/bin/bash
+# FLUX IOT Pre-commit Hook
+# 确保代码质量：格式化、Clippy 检查、测试
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+
+# 1. 运行 cargo fmt 检查
+echo "📝 Checking code formatting..."
+if ! cargo fmt --all -- --check; then
+    echo "❌ Code formatting check failed!"
+    echo "💡 Run 'cargo fmt --all' to fix formatting issues"
+    exit 1
+fi
+echo "✅ Code formatting OK"
+
+# 2. 运行 cargo clippy
+echo "🔧 Running Clippy..."
+if ! cargo clippy --all-targets -- -D warnings; then
+    echo "❌ Clippy check failed!"
+    echo "💡 Fix the warnings above before committing"
+    exit 1
+fi
+echo "✅ Clippy check OK"
+
+# 3. 运行测试
+echo "🧪 Running tests..."
+if ! cargo test --workspace --quiet; then
+    echo "❌ Tests failed!"
+    echo "💡 Fix the failing tests before committing"
+    exit 1
+fi
+echo "✅ All tests passed"
+
+echo "✨ All pre-commit checks passed!"
+exit 0

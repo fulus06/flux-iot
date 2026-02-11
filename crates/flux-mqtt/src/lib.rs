@@ -1,15 +1,16 @@
-use std::sync::Arc;
-use std::thread;
 use flux_core::bus::EventBus;
 use ntex::service::{fn_factory_with_config, fn_service};
 use ntex::util::Ready;
-use ntex_mqtt::{MqttServer, v3, v5};
+use ntex_mqtt::{v3, v5, MqttServer};
+use std::sync::Arc;
+use std::thread;
 
-mod manager;
 mod handler;
+pub mod manager;
+pub mod tls;
 
-use manager::MqttManager;
 use handler::Handler;
+use manager::MqttManager;
 
 use flux_core::traits::auth::Authenticator;
 
@@ -25,8 +26,10 @@ pub fn start_broker(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authenticat
 }
 
 #[ntex::main]
-async fn run_mqtt_server(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authenticator>) -> std::io::Result<()> {
-    
+async fn run_mqtt_server(
+    event_bus: Arc<EventBus>,
+    authenticator: Arc<dyn Authenticator>,
+) -> std::io::Result<()> {
     ntex::server::build()
         .bind("mqtt", "0.0.0.0:1883", move |_| {
             // Per-worker initialization
@@ -34,16 +37,18 @@ async fn run_mqtt_server(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authen
             let handler = Handler::new(manager.clone(), event_bus.clone(), authenticator.clone());
             let h_v3 = handler.clone();
             let h_v5 = handler.clone();
-            
+
             // Spawn local bridge task
             let bridge_manager = manager.clone();
             let bridge_bus = event_bus.clone();
-            
+
             ntex::rt::spawn(async move {
                 let mut rx = bridge_bus.subscribe();
                 while let Ok(msg) = rx.recv().await {
                     if let Ok(bytes) = serde_json::to_vec(&msg.payload) {
-                         bridge_manager.broadcast(&msg.topic, ntex::util::Bytes::from(bytes)).await;
+                        bridge_manager
+                            .broadcast(&msg.topic, ntex::util::Bytes::from(bytes))
+                            .await;
                     }
                 }
             });
@@ -59,12 +64,13 @@ async fn run_mqtt_server(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authen
                             handler::control_v3(session.clone(), req)
                         }))
                     }))
-                    .publish(fn_factory_with_config(|session: v3::Session<Handler>| {
-                        Ready::Ok::<_, handler::ServerError>(fn_service(move |req| {
-                            handler::publish_v3(session.clone(), req)
-                        }))
-                    }))
-                    )
+                    .publish(fn_factory_with_config(
+                        |session: v3::Session<Handler>| {
+                            Ready::Ok::<_, handler::ServerError>(fn_service(move |req| {
+                                handler::publish_v3(session.clone(), req)
+                            }))
+                        },
+                    )))
                     .v5(v5::MqttServer::new(move |h| {
                         let handler = h_v5.clone();
                         async move { handler::handshake_v5(h, handler).await }
@@ -74,12 +80,13 @@ async fn run_mqtt_server(event_bus: Arc<EventBus>, authenticator: Arc<dyn Authen
                             handler::control_v5(session.clone(), req)
                         }))
                     }))
-                    .publish(fn_factory_with_config(|session: v5::Session<Handler>| {
-                        Ready::Ok::<_, handler::ServerError>(fn_service(move |req| {
-                            handler::publish_v5(session.clone(), req)
-                        }))
-                    }))
-                    )
+                    .publish(fn_factory_with_config(
+                        |session: v5::Session<Handler>| {
+                            Ready::Ok::<_, handler::ServerError>(fn_service(move |req| {
+                                handler::publish_v5(session.clone(), req)
+                            }))
+                        },
+                    )))
             }
         })?
         .workers(2)

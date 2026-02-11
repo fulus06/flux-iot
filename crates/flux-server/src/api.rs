@@ -1,13 +1,15 @@
+use crate::{metrics, AppState};
 use axum::{
-    routing::{post, get},
-    Router, Json, extract::State, response::IntoResponse,
+    extract::State,
     http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
 };
-use std::sync::Arc;
+use flux_types::message::Message;
 use serde::Deserialize;
 use serde_json::Value;
-use flux_types::message::Message;
-use crate::AppState;
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct EventRequest {
@@ -26,32 +28,52 @@ async fn accept_event(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EventRequest>,
 ) -> impl IntoResponse {
+    // 记录 HTTP 请求
+    metrics::record_http_request();
+    let start = std::time::Instant::now();
+
     let msg = Message::new(req.topic, req.payload);
     let msg_id = msg.id.to_string();
-    
+
     // Publish to Event Bus
     if let Err(e) = state.event_bus.publish(msg) {
-        // Log error but mostly we don't care if there are no subscribers yet
-        tracing::warn!("Event published but no subscribers: {} (Error: {})", msg_id, e);
+        tracing::warn!(
+            "Event published but no subscribers: {} (Error: {})",
+            msg_id,
+            e
+        );
     } else {
         tracing::debug!("Event published: {}", msg_id);
+        // 记录事件发布成功
+        metrics::record_event_published();
     }
-    
-    (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "id": msg_id })))
+
+    // 记录请求时长
+    let duration = start.elapsed().as_secs_f64();
+    metrics::record_http_duration(duration);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok", "id": msg_id })),
+    )
 }
 
 pub async fn create_rule(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRuleRequest>,
 ) -> impl IntoResponse {
+    metrics::record_http_request();
+    let start = std::time::Instant::now();
+
     tracing::info!("Creating rule: {}", req.name);
 
     // 1. Compile & Validate (and Cache in ScriptEngine)
     if let Err(e) = state.script_engine.compile_script(&req.name, &req.script) {
         tracing::error!("Failed to compile rule {}: {}", req.name, e);
+        metrics::record_http_duration(start.elapsed().as_secs_f64());
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("Script compilation failed: {}", e) }))
+            Json(serde_json::json!({ "error": format!("Script compilation failed: {}", e) })),
         );
     }
 
@@ -67,49 +89,61 @@ pub async fn create_rule(
         ..Default::default()
     };
 
-    match rule.insert(&state.db).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "status": "created", "name": req.name }))
-        ),
+    let result = match rule.insert(&state.db).await {
+        Ok(_) => {
+            // 更新活跃规则数
+            let rule_count = state.script_engine.get_script_ids().len();
+            metrics::set_active_rules(rule_count);
+
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "status": "created", "name": req.name })),
+            )
+        }
         Err(e) => {
             tracing::error!("Failed to save rule to DB: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Database error: {}", e) }))
+                Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
             )
         }
-    }
+    };
+
+    metrics::record_http_duration(start.elapsed().as_secs_f64());
+    result
 }
 
-pub async fn reload_rules(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn reload_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     tracing::info!("Reloading rules from Database...");
 
     use flux_core::entity::rules;
-    use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     // 1. Fetch active rules from DB
     let active_rules = match rules::Entity::find()
         .filter(rules::Column::Active.eq(true))
         .all(&state.db)
-        .await 
+        .await
     {
         Ok(rules) => rules,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        }
     };
 
     // 2. Identify rules to compile and rules to remove
-    let mut db_rule_names: Vec<String> = active_rules.iter().map(|r| r.name.clone()).collect();
+    let db_rule_names: Vec<String> = active_rules.iter().map(|r| r.name.clone()).collect();
     let cached_rule_names = state.script_engine.get_script_ids();
-    
+
     // Compile/Update active rules
     for rule in active_rules {
         if let Err(e) = state.script_engine.compile_script(&rule.name, &rule.script) {
             tracing::error!("Failed to compile rule {}: {}", rule.name, e);
         } else {
-             tracing::info!("Reloaded rule: {}", rule.name);
+            tracing::info!("Reloaded rule: {}", rule.name);
         }
     }
 
@@ -121,14 +155,18 @@ pub async fn reload_rules(
         }
     }
 
-    (StatusCode::OK, Json(serde_json::json!({ "status": "reloaded", "count": db_rule_names.len() })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "reloaded", "count": db_rule_names.len() })),
+    )
 }
 
-pub async fn list_rules(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let scripts = state.script_engine.get_script_ids();
-    (StatusCode::OK, Json(serde_json::json!({ "rules": scripts })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "rules": scripts })),
+    )
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {

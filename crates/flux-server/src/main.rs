@@ -1,21 +1,22 @@
 use clap::Parser;
 use config::Config;
-use serde::Deserialize;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use sea_orm::{Database, DatabaseConnection, PaginatorTrait}; // SeaORM
-use flux_core::entity::{prelude::*, rules, events, devices}; // Entities
+use flux_core::entity::{devices, prelude::*, rules};
+use sea_orm::{Database, PaginatorTrait}; // SeaORM
+use std::sync::Arc; // Entities
 
 // Import our core crates
 use flux_core::bus::EventBus;
 use flux_plugin::PluginManager;
 use flux_script::ScriptEngine;
 
-mod api;
-mod worker;
-mod storage;
-mod auth;
+// 使用 lib.rs 中定义的公共类型
+use flux_server::{AppConfig, AppState};
 
+mod api;
+mod auth;
+mod metrics;
+mod storage;
+mod worker;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -24,45 +25,13 @@ struct Args {
     config: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct AppConfig {
-    pub server: ServerConfig,
-    pub database: DatabaseConfig,
-    pub plugins: PluginConfig,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct ServerConfig {
-    pub host: String,
-    pub port: u16,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct DatabaseConfig {
-    pub url: String,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct PluginConfig {
-    pub directory: String,
-}
-
-// Global Application State
-pub struct AppState {
-    pub event_bus: Arc<EventBus>,
-    pub plugin_manager: Arc<PluginManager>,
-    pub script_engine: Arc<ScriptEngine>,
-    pub db: DatabaseConnection,
-    pub config: AppConfig,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info,flux_server=debug");
     }
     tracing_subscriber::fmt::init();
-    
+
     let args = Args::parse();
     tracing::info!("Starting FLUX IOT Server with config: {}", args.config);
 
@@ -70,34 +39,43 @@ async fn main() -> anyhow::Result<()> {
     let settings = Config::builder()
         .add_source(config::File::with_name(&args.config))
         .build()?;
-    
+
     let app_config: AppConfig = settings.try_deserialize()?;
     tracing::info!("Config loaded: {:?}", app_config);
 
     // 2. Initialize Core Components
-    let event_bus = Arc::new(EventBus::new(1024));
+    let event_bus = Arc::new(EventBus::new(app_config.eventbus.capacity));
     let plugin_manager = Arc::new(PluginManager::new()?);
     let script_engine = Arc::new(ScriptEngine::new());
 
     // Connect to Database
     tracing::info!("Connecting to database: {}", app_config.database.url);
     let db = Database::connect(&app_config.database.url).await?;
-    
+
     // Create Tables (Simple Migration for MVP)
-    use sea_orm::{Schema, ConnectionTrait};
+    use sea_orm::{ConnectionTrait, Schema};
     let backend = db.get_database_backend();
     let schema = Schema::new(backend);
-    
-    let stmt = schema.create_table_from_entity(Rules).if_not_exists().to_owned();
+
+    let stmt = schema
+        .create_table_from_entity(Rules)
+        .if_not_exists()
+        .to_owned();
     db.execute(backend.build(&stmt)).await?;
-    
-    let stmt = schema.create_table_from_entity(Events).if_not_exists().to_owned();
+
+    let stmt = schema
+        .create_table_from_entity(Events)
+        .if_not_exists()
+        .to_owned();
     db.execute(backend.build(&stmt)).await?;
-    
-    let stmt = schema.create_table_from_entity(Devices).if_not_exists().to_owned();
+
+    let stmt = schema
+        .create_table_from_entity(Devices)
+        .if_not_exists()
+        .to_owned();
     db.execute(backend.build(&stmt)).await?;
     tracing::info!("Database initialized and migrations applied.");
-    
+
     // Seed Test Device
     let device_count = devices::Entity::find().count(&db).await?;
     if device_count == 0 {
@@ -110,9 +88,9 @@ async fn main() -> anyhow::Result<()> {
         };
         device.insert(&db).await?;
     }
-    
+
     // Seed Default Rule
-    use sea_orm::{EntityTrait, Set, ActiveModelTrait};
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
     let rule_count = rules::Entity::find().count(&db).await?;
     if rule_count == 0 {
         tracing::info!("Seeding default rule...");
@@ -124,26 +102,33 @@ async fn main() -> anyhow::Result<()> {
                     return true;
                 }
                 return false;
-            "#.to_owned()),
+            "#
+            .to_owned()),
             active: Set(true),
             created_at: Set(chrono::Utc::now().timestamp_millis()),
             ..Default::default() // Let DB handle ID if auto-increment (sqlite rowid)
         };
         rule.insert(&db).await?;
     }
-    
+
     // Load Plugins
     // TODO: move to a proper loader service
     let plugin_dir = &app_config.plugins.directory;
     tracing::info!("Loading plugins from: {}", plugin_dir);
-    
+
     if let Ok(entries) = std::fs::read_dir(plugin_dir) {
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "wasm") {
+            if path.extension().is_some_and(|ext| ext == "wasm") {
                 tracing::info!("Found plugin: {:?}", path);
                 if let Ok(bytes) = std::fs::read(&path) {
-                    let filename = path.file_stem().unwrap().to_string_lossy();
+                    let filename = match path.file_stem() {
+                        Some(name) => name.to_string_lossy(),
+                        None => {
+                            tracing::warn!("Invalid plugin filename: {:?}", path);
+                            continue;
+                        }
+                    };
                     // Load the plugin
                     if let Err(e) = plugin_manager.load_plugin(&filename, &bytes) {
                         tracing::error!("Failed to load plugin {}: {:?}", filename, e);
@@ -162,34 +147,41 @@ async fn main() -> anyhow::Result<()> {
         plugin_manager: plugin_manager.clone(),
         script_engine: script_engine.clone(),
         db: db.clone(),
-        config: app_config,
+        config: app_config.clone(),
     });
-    
-    
-    // 3. Start API Server (Axum)
+
+    // 3. Initialize Metrics Exporter
+    let metrics_addr = format!("{}:9090", app_config.server.host).parse()?;
+    metrics::init_metrics(metrics_addr)?;
+
+    // 设置初始指标值
+    metrics::set_eventbus_capacity(app_config.eventbus.capacity);
+    metrics::set_active_rules(script_engine.get_script_ids().len());
+    metrics::set_database_connections(1);
+
+    // 4. Start API Server (Axum)
     let app = api::create_router(state.clone());
-    
-    // 4. Start Rule Worker
+
+    // 5. Start Rule Worker
     let worker_state = state.clone();
     tokio::spawn(async move {
         worker::start_rule_worker(worker_state).await;
     });
 
-    // 5. Start Storage Worker
+    // 6. Start Storage Worker
     let storage_state = state.clone();
     tokio::spawn(async move {
         storage::start_storage_worker(storage_state).await;
     });
 
-    // 6. Start MQTT Broker (Embedded)
-    // 6. Start MQTT Broker (Ntex)
+    // 7. Start MQTT Broker (Ntex)
     let mqtt_bus = state.event_bus.clone();
     let authenticator = Arc::new(auth::DbAuthenticator::new(state.db.clone()));
     flux_mqtt::start_broker(mqtt_bus, authenticator);
 
     let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
     tracing::info!("Listening on {}", addr);
-    
+
     axum::Server::bind(&addr.parse()?)
         .serve(app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
@@ -200,17 +192,21 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to install signal handler: {}", e);
+            }
+        }
     };
 
     #[cfg(not(unix))]

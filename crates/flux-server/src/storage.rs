@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use crate::AppState;
-use flux_core::entity::{events, prelude::*};
+use flux_core::entity::events;
 use sea_orm::{ActiveModelTrait, Set};
+use std::sync::Arc;
 
 pub async fn start_storage_worker(state: Arc<AppState>) {
     tracing::info!("Starting Storage Worker...");

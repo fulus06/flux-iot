@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use ntex_mqtt::{v3, v5};
+use crate::manager::MqttManager;
 use flux_core::bus::EventBus;
 use flux_types::message::Message;
-use crate::manager::MqttManager;
+use ntex_mqtt::{v3, v5};
 
 use flux_core::traits::auth::Authenticator;
 
@@ -16,10 +16,19 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub fn new(manager: MqttManager, event_bus: Arc<EventBus>, authenticator: Arc<dyn Authenticator>) -> Self {
-        Self { manager, event_bus, authenticator, client_id: None }
+    pub fn new(
+        manager: MqttManager,
+        event_bus: Arc<EventBus>,
+        authenticator: Arc<dyn Authenticator>,
+    ) -> Self {
+        Self {
+            manager,
+            event_bus,
+            authenticator,
+            client_id: None,
+        }
     }
-    
+
     pub fn with_client_id(&self, client_id: String) -> Self {
         Self {
             manager: self.manager.clone(),
@@ -58,7 +67,11 @@ pub async fn handshake_v3(
     let password = packet.password.as_deref();
     let username = packet.username.as_deref();
 
-    match handler.authenticator.authenticate(client_id, username, password).await {
+    match handler
+        .authenticator
+        .authenticate(client_id, username, password)
+        .await
+    {
         Ok(true) => {
             let client_id = client_id.to_string();
             handler.manager.add_v3(client_id.clone(), handshake.sink());
@@ -78,7 +91,6 @@ pub async fn handshake_v3(
     }
 }
 
-
 pub async fn control_v3(
     session: v3::Session<Handler>,
     control: v3::Control<ServerError>,
@@ -86,23 +98,19 @@ pub async fn control_v3(
     match control {
         v3::Control::Protocol(v3::CtlFrame::Subscribe(mut sub)) => {
             for mut s in &mut sub {
-               s.subscribe(v3::QoS::AtLeastOnce);
+                s.subscribe(v3::QoS::AtLeastOnce);
             }
             Ok(sub.ack())
         }
-        v3::Control::Protocol(v3::CtlFrame::Unsubscribe(unsub)) => {
-            Ok(unsub.ack())
-        }
+        v3::Control::Protocol(v3::CtlFrame::Unsubscribe(unsub)) => Ok(unsub.ack()),
         v3::Control::Protocol(v3::CtlFrame::Disconnect(disc)) => {
-             if let Some(id) = &session.state().client_id {
-                 session.state().manager.remove(id);
-             }
-             Ok(disc.ack())
+            if let Some(id) = &session.state().client_id {
+                session.state().manager.remove(id);
+            }
+            Ok(disc.ack())
         }
-        v3::Control::Flow(v3::CtlFlow::Ping(ping)) => {
-            Ok(ping.ack())
-        }
-        other => Ok(other.ack())
+        v3::Control::Flow(v3::CtlFlow::Ping(ping)) => Ok(ping.ack()),
+        other => Ok(other.ack()),
     }
 }
 
@@ -112,25 +120,25 @@ pub async fn publish_v3(
     session: v3::Session<Handler>,
     mut publish: v3::Publish,
 ) -> Result<(), ServerError> {
-    let topic = publish.topic().path().to_string(); 
-    
+    let topic = publish.topic().path().to_string();
+
     // Read payload
     let payload = match publish.take_payload().read_all().await {
         Ok(b) => b,
-        Err(_) => return Ok(()), 
+        Err(_) => return Ok(()),
     };
-    
+
     // forward to event bus
     let handler = session.state();
-    
+
     // Simple JSON check
     if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&payload) {
         let msg = Message::new(topic.clone(), json_val);
         if let Err(e) = handler.event_bus.publish(msg) {
-             tracing::warn!("EventBus publish error: {}", e);
+            tracing::warn!("EventBus publish error: {}", e);
         }
     }
-    
+
     Ok(())
 }
 
@@ -145,15 +153,19 @@ pub async fn handshake_v5(
     let password = packet.password.as_deref();
     let username = packet.username.as_deref();
 
-    match handler.authenticator.authenticate(client_id, username, password).await {
+    match handler
+        .authenticator
+        .authenticate(client_id, username, password)
+        .await
+    {
         Ok(true) => {
             let client_id = client_id.to_string();
             handler.manager.add_v5(client_id.clone(), handshake.sink());
             Ok(handshake.ack(handler.with_client_id(client_id)))
         }
         Ok(false) => {
-             tracing::warn!("Auth failed for client: {}", client_id);
-             Ok(handshake.failed(v5::codec::ConnectAckReason::BadUserNameOrPassword))
+            tracing::warn!("Auth failed for client: {}", client_id);
+            Ok(handshake.failed(v5::codec::ConnectAckReason::BadUserNameOrPassword))
         }
         Err(e) => {
             tracing::error!("Auth error: {}", e);
@@ -169,23 +181,19 @@ pub async fn control_v5(
     match control {
         v5::Control::Protocol(v5::CtlFrame::Subscribe(mut sub)) => {
             for mut s in &mut sub {
-               s.subscribe(v5::QoS::AtLeastOnce);
+                s.subscribe(v5::QoS::AtLeastOnce);
             }
             Ok(sub.ack())
         }
-        v5::Control::Protocol(v5::CtlFrame::Unsubscribe(unsub)) => {
-            Ok(unsub.ack())
-        }
+        v5::Control::Protocol(v5::CtlFrame::Unsubscribe(unsub)) => Ok(unsub.ack()),
         v5::Control::Protocol(v5::CtlFrame::Disconnect(disc)) => {
-             if let Some(id) = &session.state().client_id {
-                 session.state().manager.remove(id);
-             }
-             Ok(disc.ack())
+            if let Some(id) = &session.state().client_id {
+                session.state().manager.remove(id);
+            }
+            Ok(disc.ack())
         }
-        v5::Control::Flow(v5::CtlFlow::Ping(ping)) => {
-            Ok(ping.ack())
-        }
-        other => Ok(other.ack())
+        v5::Control::Flow(v5::CtlFlow::Ping(ping)) => Ok(ping.ack()),
+        other => Ok(other.ack()),
     }
 }
 
@@ -198,15 +206,15 @@ pub async fn publish_v5(
         Ok(b) => b,
         Err(_) => return Ok(publish.ack()),
     };
-    
+
     let handler = session.state();
-    
+
     if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&payload) {
-         let msg = Message::new(topic.clone(), json_val);
-         if let Err(e) = handler.event_bus.publish(msg) {
-              tracing::warn!("EventBus publish error: {}", e);
-         }
+        let msg = Message::new(topic.clone(), json_val);
+        if let Err(e) = handler.event_bus.publish(msg) {
+            tracing::warn!("EventBus publish error: {}", e);
+        }
     }
-    
+
     Ok(publish.ack())
 }
