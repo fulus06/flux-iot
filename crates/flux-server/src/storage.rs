@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::AppState;
-use flux_core::entity::{events, prelude::*};
+use flux_core::entity::events;
 use sea_orm::{ActiveModelTrait, Set};
 
 pub async fn start_storage_worker(state: Arc<AppState>) {

@@ -1,9 +1,8 @@
-use std::sync::Arc;
 use async_trait::async_trait;
-use sea_orm::{DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait};
+use sea_orm::{DatabaseConnection, EntityTrait};
 use anyhow::Result;
 use flux_core::traits::auth::Authenticator;
-use flux_core::entity::{devices, prelude::*};
+use flux_core::entity::prelude::*;
 
 pub struct DbAuthenticator {
     db: DatabaseConnection,

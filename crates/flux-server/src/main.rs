@@ -1,59 +1,27 @@
 use clap::Parser;
 use config::Config;
-use serde::Deserialize;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use sea_orm::{Database, DatabaseConnection, PaginatorTrait}; // SeaORM
-use flux_core::entity::{prelude::*, rules, events, devices}; // Entities
+use sea_orm::{Database, PaginatorTrait}; // SeaORM
+use flux_core::entity::{prelude::*, rules, devices}; // Entities
 
 // Import our core crates
 use flux_core::bus::EventBus;
 use flux_plugin::PluginManager;
 use flux_script::ScriptEngine;
 
+// 使用 lib.rs 中定义的公共类型
+use flux_server::{AppState, AppConfig};
+
 mod api;
 mod worker;
 mod storage;
 mod auth;
-
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
     #[arg(short, long, default_value = "config.toml")]
     config: String,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct AppConfig {
-    pub server: ServerConfig,
-    pub database: DatabaseConfig,
-    pub plugins: PluginConfig,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct ServerConfig {
-    pub host: String,
-    pub port: u16,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct DatabaseConfig {
-    pub url: String,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct PluginConfig {
-    pub directory: String,
-}
-
-// Global Application State
-pub struct AppState {
-    pub event_bus: Arc<EventBus>,
-    pub plugin_manager: Arc<PluginManager>,
-    pub script_engine: Arc<ScriptEngine>,
-    pub db: DatabaseConnection,
-    pub config: AppConfig,
 }
 
 #[tokio::main]
@@ -140,10 +108,16 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(entries) = std::fs::read_dir(plugin_dir) {
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "wasm") {
+            if path.extension().is_some_and(|ext| ext == "wasm") {
                 tracing::info!("Found plugin: {:?}", path);
                 if let Ok(bytes) = std::fs::read(&path) {
-                    let filename = path.file_stem().unwrap().to_string_lossy();
+                    let filename = match path.file_stem() {
+                        Some(name) => name.to_string_lossy(),
+                        None => {
+                            tracing::warn!("Invalid plugin filename: {:?}", path);
+                            continue;
+                        }
+                    };
                     // Load the plugin
                     if let Err(e) = plugin_manager.load_plugin(&filename, &bytes) {
                         tracing::error!("Failed to load plugin {}: {:?}", filename, e);
@@ -200,17 +174,21 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            },
+            Err(e) => {
+                tracing::error!("Failed to install signal handler: {}", e);
+            }
+        }
     };
 
     #[cfg(not(unix))]

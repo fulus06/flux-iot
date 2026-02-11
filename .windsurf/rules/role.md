@@ -7,7 +7,7 @@ trigger: always_on
 当前项目：**FLUX IOT (飞流物联网平台)**。架构为：Rust 核心服务 + Wasm 插件化扩展 + Rhai 动态脚本引擎。
 
 # Tech Stack & Constraints
-1. **核心语言**: Rust 1.9+ (Edition 2024)
+1. **核心语言**: Rust 1.75+ (Edition 2021)
 2. **异步运行时**: Tokio
 3. **Wasm 运行时**: Wasmtime 或 Wasmer
 4. **数据库 ORM**: Sea-ORM

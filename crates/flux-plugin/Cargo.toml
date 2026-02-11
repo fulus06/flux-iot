@@ -8,3 +8,4 @@ flux-types = { path = "../flux-types" }
 wasmtime = "14.0" # or appropriate version
 anyhow = "1.0"
 log = "0.4"
+tracing = "0.1"

@@ -1043,6 +1043,7 @@ dependencies = [
  "flux-types",
  "sea-orm",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -1073,6 +1074,7 @@ dependencies = [
  "anyhow",
  "flux-types",
  "log",
+ "tracing",
  "wasmtime",
 ]
 
@@ -1110,10 +1112,12 @@ dependencies = [
  "flux-plugin",
  "flux-script",
  "flux-types",
+ "hyper",
  "sea-orm",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

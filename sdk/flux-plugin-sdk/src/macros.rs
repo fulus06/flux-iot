@@ -19,7 +19,15 @@ macro_rules! export_plugin_alloc {
 }
 
 /// Helper to read a String passed by the Host.
-/// Safe wrapper around raw pointers.
+/// 
+/// # Safety
+/// 
+/// This function is unsafe because it dereferences raw pointers.
+/// The caller must ensure that:
+/// - `ptr` points to valid memory allocated by the Host
+/// - The memory region `[ptr, ptr + len)` is readable
+/// - The memory is valid for the lifetime of this function call
+/// - `ptr` and `len` were provided by the Host through a valid function call
 pub unsafe fn read_string_from_host(ptr: i32, len: i32) -> String {
     let slice = std::slice::from_raw_parts(ptr as *const u8, len as usize);
     String::from_utf8_lossy(slice).to_string()

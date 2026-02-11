@@ -23,3 +23,7 @@ anyhow = "1.0"
 sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
 flux-types = { version = "0.1.0", path = "../flux-types" }
 flux-mqtt = { path = "../flux-mqtt" }
+
+[dev-dependencies]
+tower = "0.4"
+hyper = "0.14"

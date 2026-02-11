@@ -11,3 +11,6 @@ anyhow = "1.0"
 sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
 flux-types = { path = "../flux-types" }
+
+[dev-dependencies]
+serde_json = "1.0"

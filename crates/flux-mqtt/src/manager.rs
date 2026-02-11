@@ -37,6 +37,7 @@ impl MqttSink {
 }
 
 pub struct SessionState {
+    #[allow(dead_code)]
     pub client_id: String,
     pub sink: MqttSink,
 }

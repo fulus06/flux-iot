@@ -101,7 +101,7 @@ pub async fn reload_rules(
     };
 
     // 2. Identify rules to compile and rules to remove
-    let mut db_rule_names: Vec<String> = active_rules.iter().map(|r| r.name.clone()).collect();
+    let db_rule_names: Vec<String> = active_rules.iter().map(|r| r.name.clone()).collect();
     let cached_rule_names = state.script_engine.get_script_ids();
     
     // Compile/Update active rules
