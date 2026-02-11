@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crate::AppState;
+use crate::{AppState, metrics};
 
 pub async fn start_rule_worker(state: Arc<AppState>) {
     tracing::info!("Starting Rule Worker...");
@@ -30,6 +30,8 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
     loop {
         match rx.recv().await {
             Ok(msg) => {
+                // 记录事件接收
+                metrics::record_event_received();
                 tracing::debug!("Worker received message: {}", msg.id);
                 
                 // 🔥 阶段 1: 插件预处理
@@ -48,13 +50,17 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
                 
                 // 示例：调用 dummy_plugin 的 on_msg 函数
                 // 返回值是处理后的消息长度（示例插件的简单逻辑）
+                let plugin_start = std::time::Instant::now();
                 match state.plugin_manager.call_plugin("dummy_plugin", "on_msg", &msg_json) {
                     Ok(result) => {
+                        metrics::record_plugin_call();
+                        metrics::record_plugin_duration(plugin_start.elapsed().as_secs_f64());
                         tracing::info!("Plugin 'dummy_plugin' processed message, result: {}", result);
                         // 实际应用中，插件可能返回修改后的 JSON，这里简化处理
                     },
                     Err(e) => {
                         // 插件失败不应该阻止规则执行
+                        metrics::record_plugin_failure();
                         tracing::warn!("Plugin 'dummy_plugin' failed: {}, continuing with original message", e);
                     }
                 }
@@ -63,9 +69,12 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
                 // 注意：这里使用原始消息，实际应用中应该使用插件处理后的消息
                 let script_ids = state.script_engine.get_script_ids();
                 for script_id in script_ids {
+                    metrics::record_rule_executed();
+                    
                     match state.script_engine.eval_message(&script_id, &msg) {
                         Ok(triggered) => {
                              if triggered {
+                                 metrics::record_rule_triggered();
                                  tracing::warn!("!!! RULE TRIGGERED: {} (msg {}) !!!", script_id, msg.id);
                                  
                                  // 🔥 阶段 3: 规则触发后的动作插件（可选）
@@ -74,6 +83,7 @@ pub async fn start_rule_worker(state: Arc<AppState>) {
                              }
                         },
                         Err(e) => {
+                            metrics::record_rule_failed();
                             tracing::error!("Failed to execute rule {}: {}", script_id, e);
                         }
                     }

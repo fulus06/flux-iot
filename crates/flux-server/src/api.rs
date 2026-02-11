@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::Value;
 use flux_types::message::Message;
-use crate::AppState;
+use crate::{AppState, metrics};
 
 #[derive(Deserialize)]
 pub struct EventRequest {
@@ -26,16 +26,25 @@ async fn accept_event(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EventRequest>,
 ) -> impl IntoResponse {
+    // 记录 HTTP 请求
+    metrics::record_http_request();
+    let start = std::time::Instant::now();
+    
     let msg = Message::new(req.topic, req.payload);
     let msg_id = msg.id.to_string();
     
     // Publish to Event Bus
     if let Err(e) = state.event_bus.publish(msg) {
-        // Log error but mostly we don't care if there are no subscribers yet
         tracing::warn!("Event published but no subscribers: {} (Error: {})", msg_id, e);
     } else {
         tracing::debug!("Event published: {}", msg_id);
+        // 记录事件发布成功
+        metrics::record_event_published();
     }
+    
+    // 记录请求时长
+    let duration = start.elapsed().as_secs_f64();
+    metrics::record_http_duration(duration);
     
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok", "id": msg_id })))
 }
@@ -44,11 +53,15 @@ pub async fn create_rule(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRuleRequest>,
 ) -> impl IntoResponse {
+    metrics::record_http_request();
+    let start = std::time::Instant::now();
+    
     tracing::info!("Creating rule: {}", req.name);
 
     // 1. Compile & Validate (and Cache in ScriptEngine)
     if let Err(e) = state.script_engine.compile_script(&req.name, &req.script) {
         tracing::error!("Failed to compile rule {}: {}", req.name, e);
+        metrics::record_http_duration(start.elapsed().as_secs_f64());
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("Script compilation failed: {}", e) }))
@@ -67,11 +80,17 @@ pub async fn create_rule(
         ..Default::default()
     };
 
-    match rule.insert(&state.db).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "status": "created", "name": req.name }))
-        ),
+    let result = match rule.insert(&state.db).await {
+        Ok(_) => {
+            // 更新活跃规则数
+            let rule_count = state.script_engine.get_script_ids().len();
+            metrics::set_active_rules(rule_count);
+            
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "status": "created", "name": req.name }))
+            )
+        },
         Err(e) => {
             tracing::error!("Failed to save rule to DB: {}", e);
             (
@@ -79,7 +98,10 @@ pub async fn create_rule(
                 Json(serde_json::json!({ "error": format!("Database error: {}", e) }))
             )
         }
-    }
+    };
+    
+    metrics::record_http_duration(start.elapsed().as_secs_f64());
+    result
 }
 
 pub async fn reload_rules(

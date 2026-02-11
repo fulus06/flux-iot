@@ -24,6 +24,10 @@ sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "runtime-tokio-rustls"
 flux-types = { version = "0.1.0", path = "../flux-types" }
 flux-mqtt = { path = "../flux-mqtt" }
 
+# Metrics and observability
+metrics = "0.21"
+metrics-exporter-prometheus = "0.13"
+
 [dev-dependencies]
 tower = "0.4"
 hyper = "0.14"

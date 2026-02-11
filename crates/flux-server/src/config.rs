@@ -5,6 +5,12 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub plugins: PluginConfig,
+    #[serde(default)]
+    pub eventbus: EventBusConfig,
+    #[serde(default)]
+    pub mqtt: MqttConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -23,6 +29,69 @@ pub struct PluginConfig {
     pub directory: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventBusConfig {
+    #[serde(default = "default_eventbus_capacity")]
+    pub capacity: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MqttConfig {
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    #[serde(default = "default_mqtt_workers")]
+    pub workers: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+// 默认值函数
+fn default_eventbus_capacity() -> usize {
+    1024
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
+}
+
+fn default_mqtt_workers() -> usize {
+    2
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+// Default trait 实现
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_eventbus_capacity(),
+        }
+    }
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            port: default_mqtt_port(),
+            workers: default_mqtt_workers(),
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -36,6 +105,9 @@ impl Default for AppConfig {
             plugins: PluginConfig {
                 directory: "plugins".to_string(),
             },
+            eventbus: EventBusConfig::default(),
+            mqtt: MqttConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }

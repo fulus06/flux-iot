@@ -16,6 +16,7 @@ mod api;
 mod worker;
 mod storage;
 mod auth;
+mod metrics;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -43,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Config loaded: {:?}", app_config);
 
     // 2. Initialize Core Components
-    let event_bus = Arc::new(EventBus::new(1024));
+    let event_bus = Arc::new(EventBus::new(app_config.eventbus.capacity));
     let plugin_manager = Arc::new(PluginManager::new()?);
     let script_engine = Arc::new(ScriptEngine::new());
 
@@ -136,27 +137,34 @@ async fn main() -> anyhow::Result<()> {
         plugin_manager: plugin_manager.clone(),
         script_engine: script_engine.clone(),
         db: db.clone(),
-        config: app_config,
+        config: app_config.clone(),
     });
     
+    // 3. Initialize Metrics Exporter
+    let metrics_addr = format!("{}:9090", app_config.server.host).parse()?;
+    metrics::init_metrics(metrics_addr)?;
     
-    // 3. Start API Server (Axum)
+    // 设置初始指标值
+    metrics::set_eventbus_capacity(app_config.eventbus.capacity);
+    metrics::set_active_rules(script_engine.get_script_ids().len());
+    metrics::set_database_connections(1);
+    
+    // 4. Start API Server (Axum)
     let app = api::create_router(state.clone());
     
-    // 4. Start Rule Worker
+    // 5. Start Rule Worker
     let worker_state = state.clone();
     tokio::spawn(async move {
         worker::start_rule_worker(worker_state).await;
     });
 
-    // 5. Start Storage Worker
+    // 6. Start Storage Worker
     let storage_state = state.clone();
     tokio::spawn(async move {
         storage::start_storage_worker(storage_state).await;
     });
 
-    // 6. Start MQTT Broker (Embedded)
-    // 6. Start MQTT Broker (Ntex)
+    // 7. Start MQTT Broker (Ntex)
     let mqtt_bus = state.event_bus.clone();
     let authenticator = Arc::new(auth::DbAuthenticator::new(state.db.clone()));
     flux_mqtt::start_broker(mqtt_bus, authenticator);

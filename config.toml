@@ -7,3 +7,13 @@ url = "sqlite://flux.db?mode=rwc"
 
 [plugins]
 directory = "./plugins"
+
+[eventbus]
+capacity = 1024
+
+[mqtt]
+port = 1883
+workers = 2
+
+[logging]
+level = "info"
