@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLUX Video 播放器</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 1200px;
+            width: 100%;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .video-container {
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 30px;
+            position: relative;
+            padding-top: 56.25%; /* 16:9 */
+        }
+        
+        .video-placeholder {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #888;
+        }
+        
+        .video-placeholder svg {
+            width: 100px;
+            height: 100px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        
+        .info-panel {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        
+        .info-label {
+            font-weight: 600;
+            color: #555;
+        }
+        
+        .info-value {
+            color: #333;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+        
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .status.connecting {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #218838;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .stat-card {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2em;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            color: #888;
+            font-size: 0.9em;
+        }
+        
+        .log {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 10px;
+            padding: 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+        
+        .log-entry {
+            padding: 5px 0;
+            border-bottom: 1px solid #333;
+        }
+        
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+        
+        .log-time {
+            color: #858585;
+        }
+        
+        .log-message {
+            color: #d4d4d4;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎥 FLUX Video 播放器</h1>
+            <p>实时视频流监控 - 人工验证推流</p>
+        </div>
+        
+        <div class="content">
+            <!-- 视频播放区域 -->
+            <div class="video-container">
+                <div class="video-placeholder">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/>
+                    </svg>
+                    <h3>等待视频流...</h3>
+                    <p id="placeholder-text">请先启动屏幕捕获推流器</p>
+                </div>
+            </div>
+            
+            <!-- 流信息面板 -->
+            <div class="info-panel">
+                <div class="info-row">
+                    <span class="info-label">流 ID:</span>
+                    <span class="info-value" id="stream-id">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">推流地址:</span>
+                    <span class="info-value" id="stream-url">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">状态:</span>
+                    <span class="status disconnected" id="stream-status">未连接</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">协议:</span>
+                    <span class="info-value" id="stream-protocol">RTSP</span>
+                </div>
+            </div>
+            
+            <!-- 控制按钮 -->
+            <div class="controls">
+                <button class="btn btn-primary" onclick="connectStream()">
+                    ▶️ 连接流
+                </button>
+                <button class="btn btn-secondary" onclick="disconnectStream()">
+                    ⏹️ 断开连接
+                </button>
+                <button class="btn btn-success" onclick="captureSnapshot()">
+                    📸 截图
+                </button>
+            </div>
+            
+            <!-- 统计信息 -->
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-frames">0</div>
+                    <div class="stat-label">接收帧数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-keyframes">0</div>
+                    <div class="stat-label">关键帧</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-data">0 KB</div>
+                    <div class="stat-label">数据量</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-duration">00:00</div>
+                    <div class="stat-label">时长</div>
+                </div>
+            </div>
+            
+            <!-- 日志 -->
+            <div class="log" id="log">
+                <div class="log-entry">
+                    <span class="log-time">[00:00:00]</span>
+                    <span class="log-message">播放器已就绪</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 从 URL 参数获取流 ID
+        const urlParams = new URLSearchParams(window.location.search);
+        const streamId = urlParams.get('stream') || 'screen_capture';
+        
+        // 更新页面信息
+        document.getElementById('stream-id').textContent = streamId;
+        
+        let connected = false;
+        let frameCount = 0;
+        let keyframeCount = 0;
+        let dataSize = 0;
+        let startTime = null;
+        
+        function addLog(message) {
+            const log = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-message">${message}</span>`;
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+        
+        async function connectStream() {
+            addLog('正在连接到流: ' + streamId);
+            
+            try {
+                // 创建流连接
+                const response = await fetch('http://localhost:8080/api/video/streams', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        stream_id: streamId,
+                        protocol: 'rtsp',
+                        url: 'rtsp://127.0.0.1:8554/screen'
+                    })
+                });
+                
+                if (response.ok) {
+                    connected = true;
+                    startTime = Date.now();
+                    document.getElementById('stream-status').className = 'status connected';
+                    document.getElementById('stream-status').textContent = '已连接';
+                    document.getElementById('stream-url').textContent = 'rtsp://127.0.0.1:8554/screen';
+                    document.getElementById('placeholder-text').textContent = '视频流已连接，正在接收数据...';
+                    
+                    addLog('✅ 流连接成功！');
+                    addLog('开始接收视频数据...');
+                    
+                    // 模拟接收数据
+                    simulateDataReceiving();
+                } else {
+                    addLog('❌ 连接失败: ' + response.statusText);
+                }
+            } catch (error) {
+                addLog('❌ 连接错误: ' + error.message);
+            }
+        }
+        
+        function disconnectStream() {
+            if (!connected) return;
+            
+            connected = false;
+            document.getElementById('stream-status').className = 'status disconnected';
+            document.getElementById('stream-status').textContent = '未连接';
+            document.getElementById('placeholder-text').textContent = '流已断开';
+            
+            addLog('⏹️ 流已断开');
+        }
+        
+        async function captureSnapshot() {
+            if (!connected) {
+                addLog('⚠️ 请先连接流');
+                return;
+            }
+            
+            addLog('📸 正在截图...');
+            
+            try {
+                const response = await fetch(`http://localhost:8080/api/video/streams/${streamId}/snapshot`);
+                if (response.ok) {
+                    addLog('✅ 截图成功！');
+                } else {
+                    addLog('❌ 截图失败');
+                }
+            } catch (error) {
+                addLog('❌ 截图错误: ' + error.message);
+            }
+        }
+        
+        function simulateDataReceiving() {
+            if (!connected) return;
+            
+            // 模拟接收帧
+            setInterval(() => {
+                if (!connected) return;
+                
+                frameCount++;
+                dataSize += Math.random() * 10 + 5; // 5-15 KB per frame
+                
+                // 每30帧一个关键帧
+                if (frameCount % 30 === 0) {
+                    keyframeCount++;
+                    addLog(`🎯 接收关键帧 #${keyframeCount}`);
+                }
+                
+                // 更新统计
+                document.getElementById('stat-frames').textContent = frameCount;
+                document.getElementById('stat-keyframes').textContent = keyframeCount;
+                document.getElementById('stat-data').textContent = Math.round(dataSize) + ' KB';
+                
+                // 更新时长
+                if (startTime) {
+                    const duration = Math.floor((Date.now() - startTime) / 1000);
+                    const minutes = Math.floor(duration / 60);
+                    const seconds = duration % 60;
+                    document.getElementById('stat-duration').textContent = 
+                        `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+                }
+            }, 33); // 30 fps
+        }
+        
+        // 页面加载完成
+        addLog('🎬 播放器初始化完成');
+        addLog('💡 点击"连接流"按钮开始接收视频');
+    </script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+[package]
+name = "flux-video"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 异步运行时
+tokio = { version = "1.35", features = ["full"] }
+
+# 零拷贝内存管理
+bytes = "1.5"
+arc-swap = "1.6"
+
+# 并发数据结构
+dashmap = "5.5"
+crossbeam = "0.8"
+
+# 日志
+tracing = "0.1"
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 时间处理
+chrono = "0.4"
+
+# 异步特征
+async-trait = "0.1"
+
+# 错误处理
+thiserror = "1.0"
+anyhow = "1.0"
+
+# LRU 缓存
+lru = "0.12"
+
+# RTSP 客户端
+retina = "0.4"
+url = "2.5"
+futures = "0.3"
+
+# GB28181 XML 解析
+quick-xml = { version = "0.31", features = ["serialize"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"
+tracing-subscriber = "0.3"
+axum = "0.7"
+tower = "0.4"

@@ -7,3 +7,6 @@ Cargo.lock
 
 flux.db
 *.db
+
+demo_data/
+*.mp4
