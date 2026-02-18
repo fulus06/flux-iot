@@ -1,11 +1,14 @@
 // 导出配置模块供测试使用
 pub mod config;
+pub mod config_provider;
+pub mod config_manager;
 
 use flux_core::bus::EventBus;
 use flux_plugin::PluginManager;
 use flux_script::ScriptEngine;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 // 重新导出配置类型
 pub use config::AppConfig;
@@ -16,7 +19,7 @@ pub struct AppState {
     pub plugin_manager: Arc<PluginManager>,
     pub script_engine: Arc<ScriptEngine>,
     pub db: DatabaseConnection,
-    pub config: AppConfig,
+    pub config: watch::Receiver<AppConfig>,
 }
 
 // 为了测试，重新导出 api 模块的关键类型和函数

@@ -9,7 +9,7 @@ pub mod catalog;
 pub mod invite;
 
 pub use message::{SipMessage, SipMethod, SipRequest, SipResponse};
-pub use server::{SipServer, SipServerConfig};
+pub use server::{SipServer, SipServerConfig, RegisterAuthMode};
 pub use device::{Device, DeviceStatus, Channel};
 pub use session::{SipSession, SessionState};
 pub use catalog::{CatalogQuery, DeviceItem, parse_gb28181_xml, is_catalog_response, is_keepalive};

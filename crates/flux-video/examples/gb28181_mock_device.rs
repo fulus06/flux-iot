@@ -10,6 +10,8 @@ use flux_video::gb28181::sip::{
     SipResponse,
 };
 use flux_video::{Result, VideoError};
+use md5;
+use std::collections::HashMap;
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -30,6 +32,7 @@ struct MockDeviceConfig {
     longitude: Option<f64>,
     latitude: Option<f64>,
     keepalive_interval: u64,
+    password: Option<String>,
 }
 
 impl Default for MockDeviceConfig {
@@ -48,6 +51,7 @@ impl Default for MockDeviceConfig {
             longitude: None,
             latitude: None,
             keepalive_interval: 30,
+            password: None,
         }
     }
 }
@@ -109,6 +113,10 @@ async fn main() -> Result<()> {
                         if let Some(body) = &req.body {
                             if body.contains("<CmdType>Catalog</CmdType>") {
                                 handle_catalog_query(&socket, &config, body, server_addr).await?;
+                            } else if body.contains("<CmdType>DeviceInfo</CmdType>") {
+                                handle_device_info_query(&socket, &config, body, server_addr).await?;
+                            } else if body.contains("<CmdType>DeviceStatus</CmdType>") {
+                                handle_device_status_query(&socket, &config, body, server_addr).await?;
                             }
                         }
                         send_basic_ok(&socket, &req, addr).await?;
@@ -119,7 +127,7 @@ async fn main() -> Result<()> {
                 }
             }
             SipMessage::Response(resp) => {
-                tracing::info!("Received SIP response: {} {}", resp.status_code, resp.reason_phrase);
+                handle_response(&socket, &config, &resp, server_addr).await?;
             }
         }
     }
@@ -144,6 +152,7 @@ fn parse_args() -> MockDeviceConfig {
             "--longitude" => if let Some(v) = args.get(i + 1) { config.longitude = v.parse().ok(); },
             "--latitude" => if let Some(v) = args.get(i + 1) { config.latitude = v.parse().ok(); },
             "--keepalive-interval" => if let Some(v) = args.get(i + 1) { config.keepalive_interval = v.parse().unwrap_or(config.keepalive_interval); },
+            "--password" => if let Some(v) = args.get(i + 1) { config.password = Some(v.clone()); },
             _ => {}
         }
     }
@@ -152,34 +161,7 @@ fn parse_args() -> MockDeviceConfig {
 }
 
 async fn send_register(socket: &UdpSocket, cfg: &MockDeviceConfig, server_addr: SocketAddr) -> Result<()> {
-    let mut req = SipRequest::new(
-        SipMethod::Register,
-        format!("sip:{}@{}", cfg.device_id, cfg.domain),
-    );
-
-    let call_id = format!("{}@{}", chrono::Utc::now().timestamp(), cfg.domain);
-    let branch = format!("z9hG4bK{}", chrono::Utc::now().timestamp());
-
-    req.add_header(
-        "Via".to_string(),
-        format!("SIP/2.0/UDP {}:{};branch={}", cfg.local_ip, cfg.local_port, branch),
-    );
-    req.add_header(
-        "From".to_string(),
-        format!("<sip:{}@{}>;tag=1", cfg.device_id, cfg.domain),
-    );
-    req.add_header(
-        "To".to_string(),
-        format!("<sip:{}@{}>", cfg.device_id, cfg.domain),
-    );
-    req.add_header("Call-ID".to_string(), call_id);
-    req.add_header("CSeq".to_string(), "1 REGISTER".to_string());
-    req.add_header(
-        "Contact".to_string(),
-        format!("<sip:{}@{}:{}>", cfg.device_id, cfg.local_ip, cfg.local_port),
-    );
-    req.add_header("Max-Forwards".to_string(), "70".to_string());
-    req.add_header("Expires".to_string(), "3600".to_string());
+    let req = build_register_request(cfg, None, None)?;
 
     socket
         .send_to(req.to_string().as_bytes(), server_addr)
@@ -331,6 +313,121 @@ async fn handle_catalog_query(
     Ok(())
 }
 
+async fn handle_device_info_query(
+    socket: &UdpSocket,
+    cfg: &MockDeviceConfig,
+    body: &str,
+    server_addr: SocketAddr,
+) -> Result<()> {
+    let msg = parse_gb28181_xml(body)
+        .map_err(|e| VideoError::Other(format!("Parse DeviceInfo XML failed: {}", e)))?;
+
+    let sn = msg.sn.unwrap_or(1);
+    let xml = build_device_info_response_xml(cfg, sn);
+
+    send_manscdp_response(socket, cfg, server_addr, sn, &xml).await?;
+
+    tracing::info!("DeviceInfo response sent to {} (SN={})", server_addr, sn);
+    Ok(())
+}
+
+async fn handle_device_status_query(
+    socket: &UdpSocket,
+    cfg: &MockDeviceConfig,
+    body: &str,
+    server_addr: SocketAddr,
+) -> Result<()> {
+    let msg = parse_gb28181_xml(body)
+        .map_err(|e| VideoError::Other(format!("Parse DeviceStatus XML failed: {}", e)))?;
+
+    let sn = msg.sn.unwrap_or(1);
+    let xml = build_device_status_response_xml(cfg, sn);
+
+    send_manscdp_response(socket, cfg, server_addr, sn, &xml).await?;
+
+    tracing::info!("DeviceStatus response sent to {} (SN={})", server_addr, sn);
+    Ok(())
+}
+
+async fn send_manscdp_response(
+    socket: &UdpSocket,
+    cfg: &MockDeviceConfig,
+    server_addr: SocketAddr,
+    sn: u32,
+    xml: &str,
+) -> Result<()> {
+    let mut req = SipRequest::new(
+        SipMethod::Message,
+        format!("sip:{}@{}", cfg.device_id, cfg.domain),
+    );
+
+    let call_id = format!("{}@{}", chrono::Utc::now().timestamp(), cfg.domain);
+    let branch = format!("z9hG4bK{}", chrono::Utc::now().timestamp());
+
+    req.add_header(
+        "Via".to_string(),
+        format!("SIP/2.0/UDP {}:{};branch={}", cfg.local_ip, cfg.local_port, branch),
+    );
+    req.add_header(
+        "From".to_string(),
+        format!("<sip:{}@{}>;tag=1", cfg.device_id, cfg.domain),
+    );
+    req.add_header(
+        "To".to_string(),
+        format!("<sip:{}@{}>", cfg.device_id, cfg.domain),
+    );
+    req.add_header("Call-ID".to_string(), call_id);
+    req.add_header("CSeq".to_string(), format!("{} MESSAGE", sn));
+    req.add_header(
+        "Content-Type".to_string(),
+        "Application/MANSCDP+xml".to_string(),
+    );
+    req.add_header("Max-Forwards".to_string(), "70".to_string());
+
+    req.set_body(xml.to_string());
+
+    socket
+        .send_to(req.to_string().as_bytes(), server_addr)
+        .await
+        .map_err(|e| VideoError::Other(format!("Send MANSCDP response failed: {}", e)))?;
+
+    Ok(())
+}
+
+fn build_device_info_response_xml(cfg: &MockDeviceConfig, sn: u32) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="GB2312"?>
+<Response>
+<CmdType>DeviceInfo</CmdType>
+<SN>{}</SN>
+<DeviceID>{}</DeviceID>
+<Result>OK</Result>
+<DeviceName>MockDevice-{}</DeviceName>
+<Manufacturer>FluxIOT</Manufacturer>
+<Model>MockModel-v1</Model>
+<Firmware>1.0.0</Firmware>
+<Channel>{}</Channel>
+</Response>"#,
+        sn, cfg.device_id, cfg.device_id, cfg.channel_count
+    )
+}
+
+fn build_device_status_response_xml(cfg: &MockDeviceConfig, sn: u32) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="GB2312"?>
+<Response>
+<CmdType>DeviceStatus</CmdType>
+<SN>{}</SN>
+<DeviceID>{}</DeviceID>
+<Result>OK</Result>
+<Online>ONLINE</Online>
+<Status>OK</Status>
+<DeviceTime>{}</DeviceTime>
+</Response>"#,
+        sn, cfg.device_id, chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S")
+    )
+}
+
 async fn send_basic_ok(socket: &UdpSocket, req: &SipRequest, addr: SocketAddr) -> Result<()> {
     let mut resp = SipResponse::new(200, "OK".to_string());
     copy_headers(req, &mut resp);
@@ -419,6 +516,190 @@ fn build_catalog_response_xml(cfg: &MockDeviceConfig, sn: u32) -> String {
 </Response>"#,
         sn, cfg.device_id, count, count, items
     )
+}
+
+async fn handle_response(
+    socket: &UdpSocket,
+    cfg: &MockDeviceConfig,
+    resp: &SipResponse,
+    server_addr: SocketAddr,
+) -> Result<()> {
+    tracing::info!(
+        "Received SIP response: {} {}",
+        resp.status_code,
+        resp.reason_phrase
+    );
+
+    if resp.status_code == 401 {
+        if let Some(cseq) = resp.headers.get("CSeq") {
+            if cseq.contains("REGISTER") {
+                handle_register_unauthorized(socket, cfg, resp, server_addr).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_register_unauthorized(
+    socket: &UdpSocket,
+    cfg: &MockDeviceConfig,
+    resp: &SipResponse,
+    server_addr: SocketAddr,
+) -> Result<()> {
+    let Some(password) = &cfg.password else {
+        tracing::warn!("Received 401 for REGISTER but no password configured, skip auth");
+        return Ok(());
+    };
+
+    let www_auth = match resp.headers.get("WWW-Authenticate") {
+        Some(v) => v,
+        None => {
+            tracing::warn!("401 without WWW-Authenticate header");
+            return Ok(());
+        }
+    };
+
+    let Some(params) = parse_digest_auth_header(www_auth) else {
+        tracing::warn!("Failed to parse WWW-Authenticate header: {}", www_auth);
+        return Ok(());
+    };
+
+    let realm = params
+        .get("realm")
+        .map(String::as_str)
+        .unwrap_or(cfg.domain.as_str());
+    let nonce = match params.get("nonce") {
+        Some(v) => v.as_str(),
+        None => {
+            tracing::warn!("WWW-Authenticate without nonce");
+            return Ok(());
+        }
+    };
+
+    let uri = format!("sip:{}@{}", cfg.device_id, cfg.domain);
+    let method = "REGISTER";
+    let response = compute_digest_response(
+        &cfg.device_id,
+        realm,
+        password,
+        method,
+        &uri,
+        nonce,
+    );
+
+    let auth_header = format!(
+        "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=\"MD5\"",
+        cfg.device_id,
+        realm,
+        nonce,
+        uri,
+        response,
+    );
+
+    let req = build_register_request(cfg, Some(&uri), Some(&auth_header))?;
+
+    socket
+        .send_to(req.to_string().as_bytes(), server_addr)
+        .await
+        .map_err(|e| VideoError::Other(format!("Send authenticated REGISTER failed: {}", e)))?;
+
+    tracing::info!(
+        "Authenticated REGISTER sent to {} (realm={}, nonce={})",
+        server_addr,
+        realm,
+        nonce,
+    );
+
+    Ok(())
+}
+
+fn build_register_request(
+    cfg: &MockDeviceConfig,
+    uri_override: Option<&str>,
+    authorization: Option<&str>,
+) -> Result<SipRequest> {
+    let uri = uri_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("sip:{}@{}", cfg.device_id, cfg.domain));
+
+    let mut req = SipRequest::new(SipMethod::Register, uri);
+
+    let call_id = format!("{}@{}", chrono::Utc::now().timestamp(), cfg.domain);
+    let branch = format!("z9hG4bK{}", chrono::Utc::now().timestamp());
+
+    req.add_header(
+        "Via".to_string(),
+        format!(
+            "SIP/2.0/UDP {}:{};branch={}",
+            cfg.local_ip, cfg.local_port, branch
+        ),
+    );
+    req.add_header(
+        "From".to_string(),
+        format!("<sip:{}@{}>;tag=1", cfg.device_id, cfg.domain),
+    );
+    req.add_header(
+        "To".to_string(),
+        format!("<sip:{}@{}>", cfg.device_id, cfg.domain),
+    );
+    req.add_header("Call-ID".to_string(), call_id);
+    req.add_header("CSeq".to_string(), "1 REGISTER".to_string());
+    req.add_header(
+        "Contact".to_string(),
+        format!("<sip:{}@{}:{}>", cfg.device_id, cfg.local_ip, cfg.local_port),
+    );
+    req.add_header("Max-Forwards".to_string(), "70".to_string());
+    req.add_header("Expires".to_string(), "3600".to_string());
+
+    if let Some(auth) = authorization {
+        req.add_header("Authorization".to_string(), auth.to_string());
+    }
+
+    Ok(req)
+}
+
+fn parse_digest_auth_header(value: &str) -> Option<HashMap<String, String>> {
+    let prefix = "Digest ";
+    let rest = if let Some(stripped) = value.strip_prefix(prefix) {
+        stripped
+    } else {
+        value
+    };
+
+    let mut map = HashMap::new();
+
+    for part in rest.split(',') {
+        let trimmed = part.trim();
+        if let Some(eq_idx) = trimmed.find('=') {
+            let key = trimmed[..eq_idx].trim().to_string();
+            let mut val = trimmed[eq_idx + 1..].trim().to_string();
+            if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+                val = val[1..val.len() - 1].to_string();
+            }
+            map.insert(key, val);
+        }
+    }
+
+    if map.is_empty() { None } else { Some(map) }
+}
+
+fn compute_digest_response(
+    username: &str,
+    realm: &str,
+    password: &str,
+    method: &str,
+    uri: &str,
+    nonce: &str,
+) -> String {
+    let ha1_source = format!("{}:{}:{}", username, realm, password);
+    let ha1 = format!("{:x}", md5::compute(ha1_source));
+
+    let ha2_source = format!("{}:{}", method, uri);
+    let ha2 = format!("{:x}", md5::compute(ha2_source));
+
+    let resp_source = format!("{}:{}:{}", ha1, nonce, ha2);
+    format!("{:x}", md5::compute(resp_source))
 }
 
 async fn spawn_rtp_sender(ssrc: u32, target: SocketAddr) {

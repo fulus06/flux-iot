@@ -1,5 +1,4 @@
 use clap::Parser;
-use config::Config;
 use flux_core::entity::{devices, prelude::*, rules};
 use sea_orm::{Database, PaginatorTrait}; // SeaORM
 use std::sync::Arc; // Entities
@@ -11,6 +10,8 @@ use flux_script::ScriptEngine;
 
 // 使用 lib.rs 中定义的公共类型
 use flux_server::{AppConfig, AppState};
+use flux_server::config_provider::{AppConfigProvider, DbConfigProvider, FileConfigProvider};
+use flux_server::config_manager::ConfigManager;
 
 mod api;
 mod auth;
@@ -23,6 +24,12 @@ mod worker;
 struct Args {
     #[arg(short, long, default_value = "config.toml")]
     config: String,
+
+    #[arg(long, default_value = "file")]
+    config_source: String,
+
+    #[arg(long, default_value = "")]
+    config_db_url: String,
 }
 
 #[tokio::main]
@@ -35,22 +42,67 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tracing::info!("Starting FLUX IOT Server with config: {}", args.config);
 
-    // 1. Load Config
-    let settings = Config::builder()
-        .add_source(config::File::with_name(&args.config))
-        .build()?;
+    // 1. Load Config (file for dev, database for test/prod)
+    let config_source = std::env::var("FLUX_CONFIG_SOURCE").unwrap_or_else(|_| args.config_source);
+    let config_db_url = match std::env::var("FLUX_CONFIG_DB_URL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => args.config_db_url,
+    };
 
-    let app_config: AppConfig = settings.try_deserialize()?;
-    tracing::info!("Config loaded: {:?}", app_config);
+    let provider: Arc<dyn AppConfigProvider>;
+    let app_config: AppConfig;
+    let db;
+
+    if config_source.eq_ignore_ascii_case("file") {
+        provider = Arc::new(FileConfigProvider::new(args.config.clone()));
+        app_config = provider.load().await?;
+        tracing::info!("Config loaded from file: {:?}", app_config);
+
+        tracing::info!("Connecting to database: {}", app_config.database.url);
+        db = Database::connect(&app_config.database.url).await?;
+    } else {
+        let db_url = if !config_db_url.is_empty() {
+            config_db_url
+        } else if config_source.eq_ignore_ascii_case("sqlite")
+            || config_source.eq_ignore_ascii_case("db")
+            || config_source.eq_ignore_ascii_case("test")
+        {
+            "sqlite://flux.db?mode=rwc".to_string()
+        } else if config_source.eq_ignore_ascii_case("postgres")
+            || config_source.eq_ignore_ascii_case("prod")
+        {
+            std::env::var("DATABASE_URL")
+                .map_err(|_e| anyhow::anyhow!("DATABASE_URL is required for postgres config_source"))?
+        } else {
+            return Err(anyhow::anyhow!("Unknown config_source: {}", config_source));
+        };
+
+        tracing::info!("Loading config from database: {}", db_url);
+        let cfg_db = Database::connect(&db_url).await?;
+        provider = Arc::new(DbConfigProvider::new(cfg_db.clone(), Some(args.config.clone())));
+        app_config = provider.load().await?;
+        tracing::info!("Config loaded from database: {:?}", app_config);
+
+        if app_config.database.url == db_url {
+            db = cfg_db;
+        } else {
+            tracing::info!("Connecting to database: {}", app_config.database.url);
+            db = Database::connect(&app_config.database.url).await?;
+        }
+    }
+
+    // 1.1 Start config manager (hot reload)
+    let version = provider.version().await.unwrap_or(0);
+    let config_manager = Arc::new(ConfigManager::new(provider, app_config.clone(), version));
+    config_manager
+        .clone()
+        .start_polling(std::time::Duration::from_secs(2));
+    let config_rx = config_manager.subscribe();
 
     // 2. Initialize Core Components
     let event_bus = Arc::new(EventBus::new(app_config.eventbus.capacity));
     let plugin_manager = Arc::new(PluginManager::new()?);
     let script_engine = Arc::new(ScriptEngine::new());
-
-    // Connect to Database
-    tracing::info!("Connecting to database: {}", app_config.database.url);
-    let db = Database::connect(&app_config.database.url).await?;
 
     // Create Tables (Simple Migration for MVP)
     use sea_orm::{ConnectionTrait, Schema};
@@ -147,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
         plugin_manager: plugin_manager.clone(),
         script_engine: script_engine.clone(),
         db: db.clone(),
-        config: app_config.clone(),
+        config: config_rx,
     });
 
     // 3. Initialize Metrics Exporter
@@ -179,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     let authenticator = Arc::new(auth::DbAuthenticator::new(state.db.clone()));
     flux_mqtt::start_broker(mqtt_bus, authenticator);
 
-    let addr = format!("{}:{}", state.config.server.host, state.config.server.port);
+    let addr = format!("{}:{}", app_config.server.host, app_config.server.port);
     tracing::info!("Listening on {}", addr);
 
     axum::Server::bind(&addr.parse()?)

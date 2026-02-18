@@ -43,9 +43,13 @@ futures = "0.3"
 # GB28181 XML 解析
 quick-xml = { version = "0.31", features = ["serialize"] }
 
+# 摘要算法（用于 GB28181 Digest 鉴权）
+md5 = "0.7"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
 tracing-subscriber = "0.3"
 axum = "0.7"
 tower = "0.4"
+toml = "0.8"

@@ -27,6 +27,34 @@ pub struct GB28181XmlMessage {
     /// 设备列表
     #[serde(default)]
     pub device_list: Option<DeviceList>,
+
+    /// 设备名称（DeviceInfo）
+    #[serde(rename = "DeviceName", default)]
+    pub device_name: String,
+
+    /// 制造商（DeviceInfo）
+    #[serde(default)]
+    pub manufacturer: String,
+
+    /// 型号（DeviceInfo）
+    #[serde(default)]
+    pub model: String,
+
+    /// 固件版本（DeviceInfo）
+    #[serde(rename = "Firmware", default)]
+    pub firmware: String,
+
+    /// 结果（DeviceInfo/DeviceStatus）
+    #[serde(default)]
+    pub result: String,
+
+    /// 在线状态（DeviceStatus）
+    #[serde(rename = "Online", default)]
+    pub online_status: String,
+
+    /// 设备状态（DeviceStatus，部分厂商使用 Status 表示 ONLINE/OFFLINE）
+    #[serde(rename = "Status", default)]
+    pub device_status: String,
 }
 
 /// 设备列表

@@ -9,6 +9,7 @@ use flux_server::{config::AppConfig, AppState};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Schema};
 use serde_json::json;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tower::ServiceExt;
 
 async fn create_test_db() -> DatabaseConnection {
@@ -33,12 +34,14 @@ async fn create_test_state() -> Arc<AppState> {
         .await
         .expect("Failed to create table");
 
+    let (_tx, rx) = watch::channel(AppConfig::default());
+
     Arc::new(AppState {
         event_bus,
         plugin_manager,
         script_engine,
         db,
-        config: AppConfig::default(),
+        config: rx,
     })
 }
 

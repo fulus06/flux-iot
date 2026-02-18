@@ -31,3 +31,4 @@ metrics-exporter-prometheus = "0.13"
 [dev-dependencies]
 tower = "0.4"
 hyper = "0.14"
+tempfile = "3"

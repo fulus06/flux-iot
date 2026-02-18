@@ -44,6 +44,15 @@ pub struct Device {
     /// 传输协议（UDP/TCP）
     pub transport: String,
     
+    /// 制造商
+    pub manufacturer: String,
+    
+    /// 型号
+    pub model: String,
+    
+    /// 固件版本
+    pub firmware: String,
+    
     /// 通道列表
     pub channels: Vec<Channel>,
 }
@@ -61,6 +70,9 @@ impl Device {
             last_keepalive: now,
             expires: 3600, // 默认 1 小时
             transport: "UDP".to_string(),
+            manufacturer: String::new(),
+            model: String::new(),
+            firmware: String::new(),
             channels: Vec::new(),
         }
     }

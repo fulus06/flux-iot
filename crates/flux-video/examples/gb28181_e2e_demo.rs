@@ -11,14 +11,14 @@ use bytes::Bytes;
 use flux_video::{
     gb28181::{
         rtp::{receiver::RtpReceiverConfig, RtpReceiver},
-        sip::{SipServer, SipServerConfig},
+        sip::{RegisterAuthMode, SipServer, SipServerConfig},
     },
     snapshot::KeyframeExtractor,
     storage::StandaloneStorage,
     Result,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -28,6 +28,63 @@ struct AppState {
     storage: Arc<RwLock<StandaloneStorage>>,
     extractor: Arc<RwLock<KeyframeExtractor>>,
     streams: Arc<RwLock<HashMap<String, Arc<GbStreamProcessor>>>>,
+}
+
+fn load_demo_config(path: &str) -> DemoConfig {
+    match fs::read_to_string(path) {
+        Ok(s) => match toml::from_str::<DemoConfig>(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("Failed to parse auth config {}: {}", path, e);
+                DemoConfig::default()
+            }
+        },
+        Err(e) => {
+            tracing::info!("Auth config {} not found or unreadable, using defaults: {}", path, e);
+            DemoConfig::default()
+        }
+    }
+}
+
+fn apply_auth_config_to_sip(auth: &AuthFileConfig, cfg: &mut SipServerConfig) {
+    // 映射模式字符串到 RegisterAuthMode
+    if let Some(mode_str) = auth.mode.as_deref() {
+        let mode = match mode_str.to_ascii_lowercase().as_str() {
+            "none" => RegisterAuthMode::None,
+            "global" => RegisterAuthMode::Global,
+            "per_device" => RegisterAuthMode::PerDevice,
+            "global_or_per_device" => RegisterAuthMode::GlobalOrPerDevice,
+            other => {
+                tracing::warn!("Unknown auth.mode '{}', fallback to None", other);
+                RegisterAuthMode::None
+            }
+        };
+        cfg.auth_mode = mode;
+    }
+
+    if let Some(pwd) = &auth.global_password {
+        cfg.auth_password = Some(pwd.clone());
+    }
+
+    if !auth.devices.is_empty() {
+        cfg.per_device_passwords = auth.devices.clone();
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AuthFileConfig {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    global_password: Option<String>,
+    #[serde(default)]
+    devices: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DemoConfig {
+    #[serde(default)]
+    auth: AuthFileConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +254,8 @@ impl GbStreamProcessor {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
 
+    let demo_cfg = load_demo_config("./demo_data/gb28181/auth.toml");
+
     let storage = Arc::new(RwLock::new(StandaloneStorage::new(PathBuf::from("./demo_data/gb28181/storage"))?));
     let extractor = Arc::new(RwLock::new(KeyframeExtractor::new(PathBuf::from("./demo_data/gb28181/keyframes")).with_interval(2)));
 
@@ -205,7 +264,9 @@ async fn main() -> Result<()> {
         ..Default::default()
     }).await?);
 
-    let sip = Arc::new(SipServer::new(SipServerConfig::default()).await?);
+    let mut sip_cfg = SipServerConfig::default();
+    apply_auth_config_to_sip(&demo_cfg.auth, &mut sip_cfg);
+    let sip = Arc::new(SipServer::new(sip_cfg).await?);
 
     let sip_task = sip.clone();
     tokio::spawn(async move {
@@ -233,10 +294,13 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/api/gb28181/invite", post(start_invite))
         .route("/api/gb28181/catalog", post(query_catalog))
+        .route("/api/gb28181/device-info", post(query_device_info))
+        .route("/api/gb28181/device-status", post(query_device_status))
         .route(
             "/api/gb28181/devices/:device_id/channels",
             get(list_device_channels),
         )
+        .route("/api/gb28181/devices/:device_id", get(get_device_detail))
         .route("/api/gb28181/streams", get(list_streams))
         .route("/api/gb28181/streams/:stream_id/snapshot", get(snapshot))
         .with_state(state);
@@ -262,11 +326,22 @@ async fn health() -> Json<ApiResponse> {
 async fn start_invite(
     State(state): State<AppState>,
     Json(req): Json<InviteRequest>,
-) -> Result<Json<StreamInfo>> {
+) -> std::result::Result<Json<StreamInfo>, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.invite",
+        device_id = %req.device_id,
+        channel_id = %req.channel_id,
+        stream_id = %req.stream_id,
+        ssrc = req.ssrc,
+        rtp_port = req.rtp_port,
+    );
+    let _enter = span.enter();
+
     let call_id = state
         .sip
         .start_realtime_play(&req.device_id, &req.channel_id, req.rtp_port)
-        .await?;
+        .await
+        .map_err(map_video_error_to_status)?;
 
     let processor = Arc::new(GbStreamProcessor::new(
         req.stream_id.clone(),
@@ -280,7 +355,12 @@ async fn start_invite(
         state.extractor.clone(),
     ));
 
-    processor.start().await?;
+    let processor_to_start = Arc::clone(&processor);
+
+    processor_to_start
+        .start()
+        .await
+        .map_err(map_video_error_to_status)?;
 
     let mut streams = state.streams.write().await;
     streams.insert(req.stream_id.clone(), processor);
@@ -298,8 +378,18 @@ async fn start_invite(
 async fn query_catalog(
     State(state): State<AppState>,
     Json(req): Json<CatalogRequest>,
-) -> Result<Json<ApiResponse>> {
-    state.sip.query_catalog(&req.device_id).await?;
+) -> std::result::Result<Json<ApiResponse>, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.catalog",
+        device_id = %req.device_id,
+    );
+    let _enter = span.enter();
+
+    state
+        .sip
+        .query_catalog(&req.device_id)
+        .await
+        .map_err(map_video_error_to_status)?;
 
     Ok(Json(ApiResponse {
         success: true,
@@ -307,18 +397,115 @@ async fn query_catalog(
     }))
 }
 
-async fn list_device_channels(
+async fn query_device_info(
+    State(state): State<AppState>,
+    Json(req): Json<CatalogRequest>,
+) -> std::result::Result<Json<ApiResponse>, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.device_info",
+        device_id = %req.device_id,
+    );
+    let _enter = span.enter();
+
+    state
+        .sip
+        .query_device_info(&req.device_id)
+        .await
+        .map_err(map_video_error_to_status)?;
+
+    Ok(Json(ApiResponse {
+        success: true,
+        message: format!("DeviceInfo query sent to device {}", req.device_id),
+    }))
+}
+
+async fn query_device_status(
+    State(state): State<AppState>,
+    Json(req): Json<CatalogRequest>,
+) -> std::result::Result<Json<ApiResponse>, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.device_status",
+        device_id = %req.device_id,
+    );
+    let _enter = span.enter();
+
+    state
+        .sip
+        .query_device_status(&req.device_id)
+        .await
+        .map_err(map_video_error_to_status)?;
+
+    Ok(Json(ApiResponse {
+        success: true,
+        message: format!("DeviceStatus query sent to device {}", req.device_id),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceDetail {
+    device_id: String,
+    name: String,
+    ip: String,
+    port: u16,
+    status: String,
+    manufacturer: String,
+    model: String,
+    firmware: String,
+    channel_count: usize,
+}
+
+async fn get_device_detail(
     State(state): State<AppState>,
     Path(device_id): Path<String>,
-) -> Result<Json<Vec<ChannelInfo>>> {
+) -> std::result::Result<Json<DeviceDetail>, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.device_detail",
+        device_id = %device_id,
+    );
+    let _enter = span.enter();
+
     let device = state
         .sip
         .device_manager()
         .get_device(&device_id)
         .await
-        .ok_or_else(|| {
-            flux_video::VideoError::Other(format!("Device not found: {}", device_id))
-        })?;
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let status = match device.status {
+        flux_video::gb28181::sip::DeviceStatus::Online => "Online",
+        flux_video::gb28181::sip::DeviceStatus::Offline => "Offline",
+        flux_video::gb28181::sip::DeviceStatus::Registering => "Registering",
+    };
+
+    Ok(Json(DeviceDetail {
+        device_id: device.device_id,
+        name: device.name,
+        ip: device.ip,
+        port: device.port,
+        status: status.to_string(),
+        manufacturer: device.manufacturer,
+        model: device.model,
+        firmware: device.firmware,
+        channel_count: device.channels.len(),
+    }))
+}
+
+async fn list_device_channels(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+) -> std::result::Result<Json<Vec<ChannelInfo>>, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.device_channels",
+        device_id = %device_id,
+    );
+    let _enter = span.enter();
+
+    let device = state
+        .sip
+        .device_manager()
+        .get_device(&device_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let channels: Vec<ChannelInfo> = device
         .channels
@@ -337,6 +524,9 @@ async fn list_device_channels(
 }
 
 async fn list_streams(State(state): State<AppState>) -> Json<Vec<String>> {
+    let span = tracing::info_span!("http.gb28181.streams.list");
+    let _enter = span.enter();
+
     let streams = state.streams.read().await;
     Json(streams.keys().cloned().collect())
 }
@@ -344,18 +534,25 @@ async fn list_streams(State(state): State<AppState>) -> Json<Vec<String>> {
 async fn snapshot(
     State(state): State<AppState>,
     Path(stream_id): Path<String>,
-) -> Result<Response> {
+) -> std::result::Result<Response, StatusCode> {
+    let span = tracing::info_span!(
+        "http.gb28181.snapshot",
+        stream_id = %stream_id,
+    );
+    let _enter = span.enter();
+
     let streams = state.streams.read().await;
     let processor = streams
         .get(&stream_id)
-        .ok_or_else(|| flux_video::VideoError::StreamNotFound(stream_id.clone()))?;
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let Some(path) = processor.latest_keyframe_path().await else {
-        return Err(flux_video::VideoError::Other("No keyframe available".to_string()));
+        return Err(StatusCode::NOT_FOUND);
     };
 
-    let data = tokio::fs::read(&path).await
-        .map_err(|e| flux_video::VideoError::Other(format!("Failed to read keyframe: {}", e)))?;
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut response = Bytes::from(data).into_response();
     response.headers_mut().insert(
@@ -364,4 +561,11 @@ async fn snapshot(
     );
 
     Ok(response)
+}
+
+fn map_video_error_to_status(err: flux_video::VideoError) -> StatusCode {
+    match err {
+        flux_video::VideoError::StreamNotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
