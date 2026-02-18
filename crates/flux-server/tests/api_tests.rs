@@ -43,6 +43,7 @@ async fn create_test_state() -> Arc<AppState> {
         db,
         config_db: None,
         config: rx,
+        gb28181_sip: None,
     })
 }
 

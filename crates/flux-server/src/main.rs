@@ -199,6 +199,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Plugin directory not found: {}", plugin_dir);
     }
 
+    // Prepare optional GB28181 SIP server
+    let gb28181_sip: Option<Arc<SipServer>> = if app_config.gb28181.enabled {
+        let sip_cfg = app_config.gb28181_sip_server_config();
+        Some(Arc::new(SipServer::new(sip_cfg).await?))
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         event_bus: event_bus.clone(),
         plugin_manager: plugin_manager.clone(),
@@ -206,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
         db: db.clone(),
         config_db,
         config: config_rx,
+        gb28181_sip: gb28181_sip.clone(),
     });
 
     // 3. Initialize Metrics Exporter
@@ -221,10 +230,7 @@ async fn main() -> anyhow::Result<()> {
     let app = api::create_router(state.clone());
 
     // 4.1 Start GB28181 SIP Server (optional)
-    if app_config.gb28181.enabled {
-        let sip_cfg = app_config.gb28181_sip_server_config();
-        let sip = Arc::new(SipServer::new(sip_cfg).await?);
-
+    if let Some(sip) = gb28181_sip {
         let sip_task = sip.clone();
         tokio::spawn(async move {
             if let Err(e) = sip_task.start().await {

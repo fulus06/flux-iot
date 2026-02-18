@@ -9,6 +9,7 @@ use flux_script::ScriptEngine;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tokio::sync::watch;
+use flux_video::gb28181::sip::SipServer;
 
 // 重新导出配置类型
 pub use config::AppConfig;
@@ -21,6 +22,7 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub config_db: Option<DatabaseConnection>,
     pub config: watch::Receiver<AppConfig>,
+    pub gb28181_sip: Option<Arc<SipServer>>,
 }
 
 // 为了测试，重新导出 api 模块的关键类型和函数
