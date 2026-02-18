@@ -1228,6 +1228,7 @@ dependencies = [
  "flux-plugin",
  "flux-script",
  "flux-types",
+ "flux-video",
  "hyper 0.14.32",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",

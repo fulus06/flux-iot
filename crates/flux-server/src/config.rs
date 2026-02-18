@@ -1,4 +1,6 @@
+use flux_video::gb28181::sip::{RegisterAuthMode, SipServerConfig};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
@@ -11,6 +13,84 @@ pub struct AppConfig {
     pub mqtt: MqttConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub gb28181: Gb28181Config,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct Gb28181Config {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub sip: Gb28181SipConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct Gb28181SipConfig {
+    pub bind_addr: Option<String>,
+    pub sip_domain: Option<String>,
+    pub sip_id: Option<String>,
+    pub device_expires: Option<u32>,
+    pub session_timeout: Option<i64>,
+    #[serde(default)]
+    pub auth: Gb28181SipAuthConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct Gb28181SipAuthConfig {
+    #[serde(default)]
+    pub mode: RegisterAuthModeConfig,
+    pub global_password: Option<String>,
+    #[serde(default)]
+    pub per_device_passwords: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegisterAuthModeConfig {
+    None,
+    Global,
+    PerDevice,
+    GlobalOrPerDevice,
+}
+
+impl Default for RegisterAuthModeConfig {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl AppConfig {
+    pub fn gb28181_sip_server_config(&self) -> SipServerConfig {
+        let mut cfg = SipServerConfig::default();
+
+        if let Some(v) = &self.gb28181.sip.bind_addr {
+            cfg.bind_addr = v.clone();
+        }
+        if let Some(v) = &self.gb28181.sip.sip_domain {
+            cfg.sip_domain = v.clone();
+        }
+        if let Some(v) = &self.gb28181.sip.sip_id {
+            cfg.sip_id = v.clone();
+        }
+        if let Some(v) = self.gb28181.sip.device_expires {
+            cfg.device_expires = v;
+        }
+        if let Some(v) = self.gb28181.sip.session_timeout {
+            cfg.session_timeout = v;
+        }
+
+        cfg.auth_password = self.gb28181.sip.auth.global_password.clone();
+        cfg.auth_mode = match self.gb28181.sip.auth.mode {
+            RegisterAuthModeConfig::None => RegisterAuthMode::None,
+            RegisterAuthModeConfig::Global => RegisterAuthMode::Global,
+            RegisterAuthModeConfig::PerDevice => RegisterAuthMode::PerDevice,
+            RegisterAuthModeConfig::GlobalOrPerDevice => RegisterAuthMode::GlobalOrPerDevice,
+        };
+        cfg.per_device_passwords = self.gb28181.sip.auth.per_device_passwords.clone();
+
+        cfg
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -133,6 +213,7 @@ impl Default for AppConfig {
             eventbus: EventBusConfig::default(),
             mqtt: MqttConfig::default(),
             logging: LoggingConfig::default(),
+            gb28181: Gb28181Config::default(),
         }
     }
 }

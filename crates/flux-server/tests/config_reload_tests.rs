@@ -20,6 +20,13 @@ directory = "plugins"
 
 [eventbus]
 capacity = {eventbus_capacity}
+
+[mqtt]
+port = 1883
+workers = 2
+
+[logging]
+level = "info"
 "#
     )
 }
@@ -188,4 +195,64 @@ async fn test_postgres_config_hot_reload_optional() -> anyhow::Result<()> {
 
     wait_for_capacity(&mut rx, 666, Duration::from_secs(3)).await?;
     Ok(())
+}
+
+#[test]
+fn test_gb28181_auth_config_mapping() {
+    use flux_server::config::{
+        DatabaseConfig, EventBusConfig, Gb28181Config, Gb28181SipAuthConfig, Gb28181SipConfig,
+        LoggingConfig, MqttConfig, PluginConfig, RegisterAuthModeConfig, ServerConfig,
+    };
+
+    let cfg = AppConfig {
+        server: ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+        },
+        database: DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+        },
+        plugins: PluginConfig {
+            directory: "plugins".to_string(),
+        },
+        eventbus: EventBusConfig { capacity: 1 },
+        mqtt: MqttConfig::default(),
+        logging: LoggingConfig::default(),
+        gb28181: Gb28181Config {
+            enabled: true,
+            sip: Gb28181SipConfig {
+                bind_addr: Some("0.0.0.0:5060".to_string()),
+                sip_domain: Some("3402000000".to_string()),
+                sip_id: Some("34020000002000000001".to_string()),
+                device_expires: Some(3600),
+                session_timeout: Some(300),
+                auth: Gb28181SipAuthConfig {
+                    mode: RegisterAuthModeConfig::GlobalOrPerDevice,
+                    global_password: Some("pw".to_string()),
+                    per_device_passwords: std::collections::HashMap::from([
+                        ("34020000001320000001".to_string(), "p1".to_string()),
+                    ]),
+                },
+            },
+        },
+    };
+
+    let sip_cfg = cfg.gb28181_sip_server_config();
+    assert_eq!(sip_cfg.bind_addr, "0.0.0.0:5060");
+    assert_eq!(sip_cfg.sip_domain, "3402000000");
+    assert_eq!(sip_cfg.sip_id, "34020000002000000001");
+    assert_eq!(sip_cfg.device_expires, 3600);
+    assert_eq!(sip_cfg.session_timeout, 300);
+    assert_eq!(sip_cfg.auth_password.as_deref(), Some("pw"));
+    assert_eq!(
+        sip_cfg.auth_mode,
+        flux_video::gb28181::sip::RegisterAuthMode::GlobalOrPerDevice
+    );
+    assert_eq!(
+        sip_cfg
+            .per_device_passwords
+            .get("34020000001320000001")
+            .map(String::as_str),
+        Some("p1")
+    );
 }

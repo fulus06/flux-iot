@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterAuthMode {
@@ -17,6 +18,12 @@ pub enum RegisterAuthMode {
     Global,
     PerDevice,
     GlobalOrPerDevice,
+}
+
+impl Default for RegisterAuthMode {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 /// SIP 服务器配置
@@ -65,9 +72,17 @@ impl Default for SipServerConfig {
 /// GB28181 SIP 服务器
 pub struct SipServer {
     config: SipServerConfig,
+    register_auth: Arc<RwLock<RegisterAuthConfig>>,
     device_manager: Arc<DeviceManager>,
     session_manager: Arc<SessionManager>,
     socket: Arc<UdpSocket>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RegisterAuthConfig {
+    auth_password: Option<String>,
+    auth_mode: RegisterAuthMode,
+    per_device_passwords: HashMap<String, String>,
 }
 
 impl SipServer {
@@ -78,12 +93,31 @@ impl SipServer {
         
         tracing::info!("GB28181 SIP server listening on {}", config.bind_addr);
         
+        let register_auth = RegisterAuthConfig {
+            auth_password: config.auth_password.clone(),
+            auth_mode: config.auth_mode,
+            per_device_passwords: config.per_device_passwords.clone(),
+        };
+
         Ok(Self {
             config,
+            register_auth: Arc::new(RwLock::new(register_auth)),
             device_manager: Arc::new(DeviceManager::new()),
             session_manager: Arc::new(SessionManager::new()),
             socket: Arc::new(socket),
         })
+    }
+
+    pub async fn update_register_auth(
+        &self,
+        mode: RegisterAuthMode,
+        global_password: Option<String>,
+        per_device_passwords: HashMap<String, String>,
+    ) {
+        let mut guard = self.register_auth.write().await;
+        guard.auth_mode = mode;
+        guard.auth_password = global_password;
+        guard.per_device_passwords = per_device_passwords;
     }
     
     /// 启动服务器
@@ -166,7 +200,7 @@ impl SipServer {
                 self.handle_bye(req, addr).await?;
             }
             _ => {
-                tracing::warn!("Unsupported SIP method: {}", req.method);
+                tracing::warn!("Unsupported SIP me.awaitthod: {}", req.method);
             }
         }
         
@@ -194,7 +228,7 @@ impl SipServer {
         tracing::info!(target: "gb28181::sip", "Handling REGISTER");
         
         // 如果配置了全局密码，则进行 Digest 鉴权
-        let auth_mode = self.effective_auth_mode();
+        let auth_mode = self.effective_auth_mode().await;
 
         if !matches!(auth_mode, RegisterAuthMode::None) {
             let authorized = self
@@ -246,10 +280,11 @@ impl SipServer {
         Ok(())
     }
 
-    fn effective_auth_mode(&self) -> RegisterAuthMode {
-        match self.config.auth_mode {
+    async fn effective_auth_mode(&self) -> RegisterAuthMode {
+        let guard = self.register_auth.read().await;
+        match guard.auth_mode {
             RegisterAuthMode::None => {
-                if self.config.auth_password.is_some() {
+                if guard.auth_password.is_some() {
                     RegisterAuthMode::Global
                 } else {
                     RegisterAuthMode::None
@@ -271,28 +306,26 @@ impl SipServer {
             return Ok(true);
         }
 
-        let password_opt: Option<&str> = match mode {
-            RegisterAuthMode::None => None,
-            RegisterAuthMode::Global => self.config.auth_password.as_deref(),
-            RegisterAuthMode::PerDevice => self
-                .config
-                .per_device_passwords
-                .get(device_id)
-                .map(|s| s.as_str()),
-            RegisterAuthMode::GlobalOrPerDevice => {
-                if let Some(p) = self
-                    .config
+        let password_opt: Option<String> = {
+            let guard = self.register_auth.read().await;
+            match mode {
+                RegisterAuthMode::None => None,
+                RegisterAuthMode::Global => guard.auth_password.clone(),
+                RegisterAuthMode::PerDevice => guard
                     .per_device_passwords
                     .get(device_id)
-                {
-                    Some(p.as_str())
-                } else {
-                    self.config.auth_password.as_deref()
+                    .cloned(),
+                RegisterAuthMode::GlobalOrPerDevice => {
+                    if let Some(p) = guard.per_device_passwords.get(device_id) {
+                        Some(p.clone())
+                    } else {
+                        guard.auth_password.clone()
+                    }
                 }
             }
         };
 
-        let Some(password) = password_opt else {
+        let Some(password) = password_opt.as_deref() else {
             tracing::warn!(
                 target: "gb28181::sip",
                 %device_id,

@@ -7,6 +7,7 @@ use std::sync::Arc; // Entities
 use flux_core::bus::EventBus;
 use flux_plugin::PluginManager;
 use flux_script::ScriptEngine;
+use flux_video::gb28181::sip::SipServer;
 
 // 使用 lib.rs 中定义的公共类型
 use flux_server::{AppConfig, AppState};
@@ -52,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let provider: Arc<dyn AppConfigProvider>;
     let app_config: AppConfig;
     let db;
+    let config_db: Option<sea_orm::DatabaseConnection>;
 
     if config_source.eq_ignore_ascii_case("file") {
         provider = Arc::new(FileConfigProvider::new(args.config.clone()));
@@ -60,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("Connecting to database: {}", app_config.database.url);
         db = Database::connect(&app_config.database.url).await?;
+        config_db = None;
     } else {
         let db_url = if !config_db_url.is_empty() {
             config_db_url
@@ -82,6 +85,8 @@ async fn main() -> anyhow::Result<()> {
         provider = Arc::new(DbConfigProvider::new(cfg_db.clone(), Some(args.config.clone())));
         app_config = provider.load().await?;
         tracing::info!("Config loaded from database: {:?}", app_config);
+
+        config_db = Some(cfg_db.clone());
 
         if app_config.database.url == db_url {
             db = cfg_db;
@@ -199,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
         plugin_manager: plugin_manager.clone(),
         script_engine: script_engine.clone(),
         db: db.clone(),
+        config_db,
         config: config_rx,
     });
 
@@ -213,6 +219,39 @@ async fn main() -> anyhow::Result<()> {
 
     // 4. Start API Server (Axum)
     let app = api::create_router(state.clone());
+
+    // 4.1 Start GB28181 SIP Server (optional)
+    if app_config.gb28181.enabled {
+        let sip_cfg = app_config.gb28181_sip_server_config();
+        let sip = Arc::new(SipServer::new(sip_cfg).await?);
+
+        let sip_task = sip.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sip_task.start().await {
+                tracing::error!("GB28181 SIP server stopped: {}", e);
+            }
+        });
+
+        let mut cfg_rx = state.config.clone();
+        let sip_to_update = sip.clone();
+        tokio::spawn(async move {
+            loop {
+                if cfg_rx.changed().await.is_err() {
+                    break;
+                }
+
+                let cfg = cfg_rx.borrow().clone();
+                let new_sip_cfg = cfg.gb28181_sip_server_config();
+                sip_to_update
+                    .update_register_auth(
+                        new_sip_cfg.auth_mode,
+                        new_sip_cfg.auth_password,
+                        new_sip_cfg.per_device_passwords,
+                    )
+                    .await;
+            }
+        });
+    }
 
     // 5. Start Rule Worker
     let worker_state = state.clone();

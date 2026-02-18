@@ -19,6 +19,7 @@ pub struct AppState {
     pub plugin_manager: Arc<PluginManager>,
     pub script_engine: Arc<ScriptEngine>,
     pub db: DatabaseConnection,
+    pub config_db: Option<DatabaseConnection>,
     pub config: watch::Receiver<AppConfig>,
 }
 

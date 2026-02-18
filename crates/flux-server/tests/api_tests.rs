@@ -41,6 +41,7 @@ async fn create_test_state() -> Arc<AppState> {
         plugin_manager,
         script_engine,
         db,
+        config_db: None,
         config: rx,
     })
 }

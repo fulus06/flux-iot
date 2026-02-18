@@ -23,6 +23,7 @@ anyhow = "1.0"
 sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
 flux-types = { version = "0.1.0", path = "../flux-types" }
 flux-mqtt = { path = "../flux-mqtt" }
+flux-video = { path = "../flux-video" }
 
 # Metrics and observability
 metrics = "0.21"
