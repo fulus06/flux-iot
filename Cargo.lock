@@ -1169,6 +1169,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "flux-media-core",
  "flux-video",
  "hyper 0.14.32",
  "rand",
@@ -1180,6 +1181,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+]
+
+[[package]]
+name = "flux-media-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tracing",
 ]
 
 [[package]]

@@ -12,10 +12,13 @@ use flux_video::{
         rtp::{receiver::RtpReceiverConfig, RtpReceiver},
         sip::{SipServer, SipServerConfig},
     },
-    snapshot::KeyframeExtractor,
-    storage::StandaloneStorage,
     Result as VideoResult,
     VideoError,
+};
+use flux_media_core::{
+    snapshot::SnapshotOrchestrator,
+    storage::{filesystem::FileSystemStorage, MediaStorage, StorageConfig},
+    types::StreamId,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -47,8 +50,8 @@ struct Args {
 struct AppState {
     sip: Arc<SipServer>,
     rtp_receiver: Arc<RtpReceiver>,
-    storage: Arc<RwLock<StandaloneStorage>>,
-    extractor: Arc<RwLock<KeyframeExtractor>>,
+    storage: Arc<RwLock<FileSystemStorage>>,
+    orchestrator: Arc<SnapshotOrchestrator>,
     streams: Arc<RwLock<HashMap<String, Arc<GbStreamProcessor>>>>,
 }
 
@@ -87,9 +90,8 @@ struct GbStreamProcessor {
     rtp_port: u16,
     call_id: String,
     rtp_receiver: Arc<RtpReceiver>,
-    storage: Arc<RwLock<StandaloneStorage>>,
-    extractor: Arc<RwLock<KeyframeExtractor>>,
-    latest_keyframe: Arc<RwLock<Option<String>>>,
+    storage: Arc<RwLock<FileSystemStorage>>,
+    orchestrator: Arc<SnapshotOrchestrator>,
     running: Arc<RwLock<bool>>,
 }
 
@@ -102,8 +104,8 @@ impl GbStreamProcessor {
         rtp_port: u16,
         call_id: String,
         rtp_receiver: Arc<RtpReceiver>,
-        storage: Arc<RwLock<StandaloneStorage>>,
-        extractor: Arc<RwLock<KeyframeExtractor>>,
+        storage: Arc<RwLock<FileSystemStorage>>,
+        orchestrator: Arc<SnapshotOrchestrator>,
     ) -> Self {
         Self {
             stream_id,
@@ -114,8 +116,7 @@ impl GbStreamProcessor {
             call_id,
             rtp_receiver,
             storage,
-            extractor,
-            latest_keyframe: Arc::new(RwLock::new(None)),
+            orchestrator,
             running: Arc::new(RwLock::new(false)),
         }
     }
@@ -180,23 +181,30 @@ impl GbStreamProcessor {
     async fn save_frame(&self, data: &[u8]) -> VideoResult<()> {
         let timestamp = chrono::Utc::now();
         let bytes = Bytes::copy_from_slice(data);
+        let stream_id = StreamId::from_string(self.stream_id.clone());
         let mut storage = self.storage.write().await;
-        storage.put_object(&self.stream_id, timestamp, bytes).await?;
+        storage.put_object(&stream_id, timestamp, bytes).await
+            .map_err(|e| VideoError::Other(e.to_string()))?;
         Ok(())
     }
 
     async fn extract_keyframe(&self, data: &[u8]) -> VideoResult<()> {
         let timestamp = chrono::Utc::now();
-        let mut extractor = self.extractor.write().await;
-        if let Some(keyframe) = extractor.process(&self.stream_id, data, timestamp).await? {
-            let mut latest = self.latest_keyframe.write().await;
-            *latest = Some(keyframe.file_path.clone());
-        }
+        let stream_id = StreamId::from_string(self.stream_id.clone());
+        self.orchestrator.process_keyframe(&stream_id, data, timestamp).await
+            .map_err(|e| VideoError::Other(e.to_string()))?;
         Ok(())
     }
 
     async fn latest_keyframe_path(&self) -> Option<String> {
-        self.latest_keyframe.read().await.clone()
+        let stream_id = StreamId::from_string(self.stream_id.clone());
+        let req = flux_media_core::snapshot::SnapshotRequest {
+            stream_id,
+            mode: flux_media_core::snapshot::SnapshotMode::Keyframe,
+            width: None,
+            height: None,
+        };
+        self.orchestrator.get_snapshot(req).await.ok().map(|_| String::new())
     }
 }
 
@@ -213,12 +221,13 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let storage = Arc::new(RwLock::new(StandaloneStorage::new(PathBuf::from(
-        &args.storage_dir,
-    ))?));
-    let extractor = Arc::new(RwLock::new(
-        KeyframeExtractor::new(PathBuf::from(&args.keyframe_dir)).with_interval(args.keyframe_interval_secs),
-    ));
+    let storage_config = StorageConfig {
+        root_dir: PathBuf::from(&args.storage_dir),
+        retention_days: 7,
+        segment_duration_secs: 60,
+    };
+    let storage = Arc::new(RwLock::new(FileSystemStorage::new(storage_config)?));
+    let orchestrator = Arc::new(SnapshotOrchestrator::new(PathBuf::from(&args.keyframe_dir)));
 
     let rtp_receiver = Arc::new(
         RtpReceiver::new(RtpReceiverConfig {
@@ -251,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
         sip,
         rtp_receiver,
         storage,
-        extractor,
+        orchestrator,
         streams: Arc::new(RwLock::new(HashMap::new())),
     };
 
@@ -318,7 +327,7 @@ async fn invite(
         call_id.clone(),
         state.rtp_receiver.clone(),
         state.storage.clone(),
-        state.extractor.clone(),
+        state.orchestrator.clone(),
     ));
 
     processor
@@ -450,24 +459,26 @@ async fn snapshot(
     State(state): State<AppState>,
     Path(stream_id): Path<String>,
 ) -> std::result::Result<Response, StatusCode> {
-    let streams = state.streams.read().await;
-    let processor = streams.get(&stream_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    let Some(path) = processor.latest_keyframe_path().await else {
-        return Err(StatusCode::NOT_FOUND);
+    let media_stream_id = StreamId::from_string(stream_id.clone());
+    let req = flux_media_core::snapshot::SnapshotRequest {
+        stream_id: media_stream_id,
+        mode: flux_media_core::snapshot::SnapshotMode::Auto,
+        width: None,
+        height: None,
     };
 
-    let data = tokio::fs::read(&path)
+    let snapshot = state
+        .orchestrator
+        .get_snapshot(req)
         .await
-        .map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    let mut response = Bytes::from(data).into_response();
-    response.headers_mut().insert(
-        "Content-Type",
+    let mut resp: Response = snapshot.data.into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-
-    Ok(response)
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -696,12 +707,15 @@ Content-Length: 0\r\n\
         let storage_dir = temp_dir.path().join("storage");
         let keyframe_dir = temp_dir.path().join("keyframes");
 
+        let storage_config = StorageConfig {
+            root_dir: storage_dir,
+            retention_days: 7,
+            segment_duration_secs: 60,
+        };
         let storage = Arc::new(RwLock::new(
-            StandaloneStorage::new(storage_dir).expect("storage"),
+            FileSystemStorage::new(storage_config).expect("storage"),
         ));
-        let extractor = Arc::new(RwLock::new(
-            KeyframeExtractor::new(keyframe_dir).with_interval(0),
-        ));
+        let orchestrator = Arc::new(SnapshotOrchestrator::new(keyframe_dir));
 
         let rtp_receiver = Arc::new(
             RtpReceiver::new(RtpReceiverConfig {
@@ -732,7 +746,7 @@ Content-Length: 0\r\n\
             sip: sip.clone(),
             rtp_receiver: rtp_receiver.clone(),
             storage,
-            extractor,
+            orchestrator,
             streams: Arc::new(RwLock::new(HashMap::new())),
         };
 
@@ -867,14 +881,16 @@ Content-Length: 0\r\n\
         let storage_dir = temp_dir.path().join("storage");
         let keyframe_dir = temp_dir.path().join("keyframes");
 
-        let storage = Arc::new(RwLock::new(match StandaloneStorage::new(storage_dir) {
+        let storage_config = StorageConfig {
+            root_dir: storage_dir,
+            retention_days: 7,
+            segment_duration_secs: 60,
+        };
+        let storage = Arc::new(RwLock::new(match FileSystemStorage::new(storage_config) {
             Ok(v) => v,
             Err(_) => return false,
         }));
-
-        let extractor = Arc::new(RwLock::new(
-            KeyframeExtractor::new(keyframe_dir).with_interval(0),
-        ));
+        let orchestrator = Arc::new(SnapshotOrchestrator::new(keyframe_dir));
 
         let rtp_receiver = Arc::new(
             match RtpReceiver::new(RtpReceiverConfig {
@@ -917,7 +933,7 @@ Content-Length: 0\r\n\
             sip: sip.clone(),
             rtp_receiver: rtp_receiver.clone(),
             storage,
-            extractor,
+            orchestrator,
             streams: Arc::new(RwLock::new(HashMap::new())),
         };
 

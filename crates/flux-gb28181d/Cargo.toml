@@ -16,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 flux-video = { path = "../flux-video" }
+flux-media-core = { path = "../flux-media-core" }
 
 [dev-dependencies]
 tower = "0.4"

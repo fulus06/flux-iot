@@ -6,8 +6,10 @@ members = [
     "crates/flux-script",
     "crates/flux-server",
     "crates/flux-mqtt",
-    "sdk/flux-plugin-sdk", "crates/flux-video",
+    "sdk/flux-plugin-sdk", 
+    "crates/flux-video",
     "crates/flux-gb28181d",
+    "crates/flux-media-core",
     # "plugins/*", # Plugins are often separate build targets (wasm32), but can be in workspace for convenience if needed.
                    # However, mixing targets in workspace can be tricky. Let's keep them out of default members or handle carefully.
                    # For now, let's include them but we might need to be careful with `cargo build` at root.
