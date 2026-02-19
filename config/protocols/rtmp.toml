@@ -1,0 +1,17 @@
+[server]
+rtmp_bind = "0.0.0.0:1935"
+http_bind = "0.0.0.0:8082"
+
+[hls]
+segment_duration = 6
+playlist_length = 5
+
+[storage]
+storage_dir = "./data/hls"
+
+[timeshift]
+# RTMP 特定的时移配置（覆盖全局配置）
+enabled = true
+hot_cache_duration = 600      # 10 分钟（覆盖全局的 5 分钟）
+cold_storage_duration = 7200  # 2 小时（覆盖全局的 1 小时）
+# max_segments 继承全局配置 600

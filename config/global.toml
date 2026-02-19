@@ -1,0 +1,21 @@
+[system]
+name = "FLUX IOT Media Platform"
+version = "1.0.0"
+
+[timeshift]
+# 全局时移配置（默认值）
+enabled = true
+hot_cache_duration = 300      # 5 分钟（秒）
+cold_storage_duration = 3600  # 60 分钟（秒）
+max_segments = 600
+storage_root = "./data/timeshift"
+
+# 性能配置
+batch_write_size = 10
+batch_write_interval = 5
+lru_cache_size_mb = 500
+
+[storage]
+# 全局存储配置
+root_dir = "./data"
+retention_days = 7

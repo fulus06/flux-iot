@@ -1,0 +1,10 @@
+[server]
+http_bind = "0.0.0.0:8085"
+
+[storage]
+storage_dir = "./data/srt/storage"
+keyframe_dir = "./data/srt/keyframes"
+
+[timeshift]
+# SRT 时移配置（低延迟场景，默认不启用）
+enabled = false

@@ -1,0 +1,6 @@
+[server]
+http_bind = "0.0.0.0:8084"
+
+[timeshift]
+# ONVIF 不需要时移（仅设备管理）
+enabled = false

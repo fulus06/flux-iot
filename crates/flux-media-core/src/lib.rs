@@ -3,6 +3,7 @@ pub mod playback;
 pub mod protocol;
 pub mod snapshot;
 pub mod storage;
+pub mod timeshift;
 pub mod types;
 
 pub use error::{MediaError, Result};

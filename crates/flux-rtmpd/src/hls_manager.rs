@@ -1,19 +1,22 @@
-use anyhow::Result;
-use bytes::Bytes;
+use anyhow::{anyhow, Result};
+use bytes::{BufMut, Bytes, BytesMut};
+use chrono::{DateTime, Duration, Utc};
 use flux_media_core::playback::{HlsGenerator, TsMuxer};
+use flux_media_core::timeshift::{Segment, SegmentFormat, SegmentMetadata, TimeShiftCore};
 use flux_media_core::types::StreamId;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info};
 
 /// HLS 管理器：负责将 RTMP 流转换为 HLS
 pub struct HlsManager {
     generators: Arc<RwLock<HashMap<String, Arc<HlsStreamContext>>>>,
     storage_dir: PathBuf,
+    timeshift: Option<Arc<TimeShiftCore>>,
 }
 
 /// HLS 流上下文
@@ -35,9 +38,14 @@ pub struct SegmentBuffer {
 
 impl HlsManager {
     pub fn new(storage_dir: PathBuf) -> Self {
+        Self::with_timeshift(storage_dir, None)
+    }
+    
+    pub fn with_timeshift(storage_dir: PathBuf, timeshift: Option<Arc<TimeShiftCore>>) -> Self {
         Self {
             generators: Arc::new(RwLock::new(HashMap::new())),
             storage_dir,
+            timeshift,
         }
     }
 
@@ -192,8 +200,28 @@ impl HlsManager {
                         size = total_size,
                         "HLS segment saved"
                     );
+                
+                // 添加到时移管理器
+                if let Some(ref timeshift) = self.timeshift {
+                    let ts_segment = Segment {
+                        sequence: segment_info.sequence,
+                        start_time: Utc::now() - Duration::milliseconds((duration * 1000.0) as i64),
+                        duration,
+                        data: Bytes::from(ts_data.clone()),
+                        metadata: SegmentMetadata {
+                            format: SegmentFormat::Ts,
+                            has_keyframe: true,
+                            file_path: Some(segment_path.clone()),
+                            size: total_size as u64,
+                        },
+                    };
+                    
+                    if let Err(e) = timeshift.add_segment(&context.stream_id.as_str(), ts_segment).await {
+                        error!(target: "hls_manager", "Failed to add segment to timeshift: {}", e);
+                    }
                 }
             }
+        }
         }
 
         // 清空当前分片
@@ -215,6 +243,36 @@ impl HlsManager {
         } else {
             Err(anyhow::anyhow!("Stream not found: {}", key))
         }
+    }
+
+    /// 获取 M3U8 播放列表（支持时移）
+    pub async fn get_playlist_with_timeshift(
+        &self,
+        app_name: &str,
+        stream_key: &str,
+        start_time: Option<DateTime<Utc>>,
+    ) -> Result<String> {
+        let key = format!("{}/{}", app_name, stream_key);
+        
+        // 如果启用时移且指定了开始时间
+        if let (Some(ref timeshift), Some(start)) = (&self.timeshift, start_time) {
+            let generators = self.generators.read().await;
+            let context = generators.get(&key)
+                .ok_or_else(|| anyhow!("Stream not found: {}", key))?;
+            
+            // 从时移获取分片
+            let segments = timeshift.get_segments_from(
+                &context.stream_id.as_str(),
+                start,
+                Some(SegmentFormat::Ts),
+            ).await?;
+            
+            // 生成 M3U8
+            return self.build_m3u8_from_segments(&segments);
+        }
+        
+        // 实时模式
+        self.get_playlist(app_name, stream_key).await
     }
 
     /// 获取 TS 分片数据
@@ -290,6 +348,33 @@ impl HlsManager {
         let key = format!("{}/{}", app_name, stream_key);
         let generators = self.generators.read().await;
         generators.contains_key(&key)
+    }
+    
+    /// 从分片列表构建 M3U8
+    fn build_m3u8_from_segments(&self, segments: &[Segment]) -> Result<String> {
+        let mut m3u8 = String::new();
+        m3u8.push_str("#EXTM3U\n");
+        m3u8.push_str("#EXT-X-VERSION:3\n");
+        m3u8.push_str("#EXT-X-TARGETDURATION:6\n");
+        
+        if let Some(first) = segments.first() {
+            m3u8.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{}\n", first.sequence));
+        }
+        
+        for segment in segments {
+            m3u8.push_str(&format!("#EXTINF:{:.3},\n", segment.duration));
+            
+            // 从文件路径提取文件名
+            if let Some(ref path) = segment.metadata.file_path {
+                if let Some(filename) = path.file_name() {
+                    m3u8.push_str(&format!("{}\n", filename.to_string_lossy()));
+                }
+            } else {
+                m3u8.push_str(&format!("segment_{}.ts\n", segment.sequence));
+            }
+        }
+        
+        Ok(m3u8)
     }
 }
 

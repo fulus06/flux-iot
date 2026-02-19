@@ -113,10 +113,19 @@ async fn snapshot(
     Ok(resp)
 }
 
+#[derive(serde::Deserialize)]
+struct HlsPlaylistQuery {
+    /// 开始时间偏移（秒，负数表示从现在往前）
+    start_time: Option<i64>,
+}
+
 async fn hls_playlist(
     State(state): State<AppState>,
     Path(stream_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<HlsPlaylistQuery>,
 ) -> std::result::Result<Response, StatusCode> {
+    use chrono::{Duration, Utc};
+    
     // stream_id 格式: "rtmp/live/test123" -> app="live", key="test123"
     let parts: Vec<&str> = stream_id.split('/').collect();
     if parts.len() < 3 {
@@ -126,12 +135,17 @@ async fn hls_playlist(
     let app_name = parts[1];
     let stream_key = parts[2];
 
+    // 计算开始时间
+    let start_time = query.start_time.map(|offset| {
+        Utc::now() + Duration::seconds(offset) // offset 为负数表示过去
+    });
+
     let playlist = state.hls_manager
-        .get_playlist(app_name, stream_key)
+        .get_playlist_with_timeshift(app_name, stream_key, start_time)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    let mut resp: Response = playlist.into_response();
+    let mut resp = Response::new(playlist.into());
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/vnd.apple.mpegurl"),
@@ -309,9 +323,20 @@ async fn main() -> anyhow::Result<()> {
     // 创建流管理器
     let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
-    // 创建 HLS 管理器
+    // 创建时移管理器
+    use flux_media_core::timeshift::{TimeShiftCore, TimeShiftConfig};
+    let timeshift_config = TimeShiftConfig::default();
+    let timeshift = Arc::new(TimeShiftCore::new(
+        timeshift_config,
+        PathBuf::from("./data/timeshift")
+    ));
+    
+    // 创建 HLS 管理器（集成时移）
     let hls_dir = PathBuf::from("./data/hls");
-    let hls_manager = Arc::new(hls_manager::HlsManager::new(hls_dir));
+    let hls_manager = Arc::new(hls_manager::HlsManager::with_timeshift(
+        hls_dir,
+        Some(timeshift)
+    ));
 
     // 启动 RTMP 服务器
     let rtmp_server = Arc::new(RtmpServer::new(
