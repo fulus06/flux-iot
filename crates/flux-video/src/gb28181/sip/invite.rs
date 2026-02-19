@@ -17,6 +17,9 @@ pub struct SdpSession {
     
     /// 连接信息
     pub connection: SdpConnection,
+
+    /// SSRC（GB28181 使用 y= 行携带 SSRC）
+    pub ssrc: Option<u32>,
     
     /// 媒体描述
     pub media: Vec<SdpMedia>,
@@ -82,6 +85,7 @@ impl SdpSession {
                 address_type: "IP4".to_string(),
                 address: ip,
             },
+            ssrc: None,
             media: Vec::new(),
         }
     }
@@ -145,6 +149,11 @@ impl SdpSession {
         
         // t= 时间
         sdp.push_str("t=0 0\r\n");
+
+        // y= SSRC (GB28181)
+        if let Some(ssrc) = self.ssrc {
+            sdp.push_str(&format!("y={:010}\r\n", ssrc));
+        }
         
         // m= 媒体描述
         for media in &self.media {
@@ -189,6 +198,7 @@ impl SdpSession {
                 address_type: "IP4".to_string(),
                 address: String::new(),
             },
+            ssrc: None,
             media: Vec::new(),
         };
         
@@ -223,6 +233,11 @@ impl SdpSession {
                             session.connection.network_type = parts[0].to_string();
                             session.connection.address_type = parts[1].to_string();
                             session.connection.address = parts[2].to_string();
+                        }
+                    }
+                    "y" => {
+                        if let Ok(v) = value.trim().parse::<u32>() {
+                            session.ssrc = Some(v);
                         }
                     }
                     "m" => {
@@ -295,6 +310,7 @@ mod tests {
     #[test]
     fn test_sdp_generation() {
         let mut session = SdpSession::new("34020000002000000001".to_string(), "192.168.1.100".to_string());
+        session.ssrc = Some(123);
         session.add_video(9000);
         
         let sdp = session.to_string();
@@ -307,6 +323,7 @@ mod tests {
         assert!(sdp.contains("a=rtpmap:96 PS/90000"));
         assert!(sdp.contains("a=rtpmap:98 H264/90000"));
         assert!(sdp.contains("a=recvonly"));
+        assert!(sdp.contains("y=0000000123"));
     }
     
     #[test]
@@ -316,6 +333,7 @@ mod tests {
                        s=Play\r\n\
                        c=IN IP4 192.168.1.200\r\n\
                        t=0 0\r\n\
+                       y=0000001234\r\n\
                        m=video 15060 RTP/AVP 96\r\n\
                        a=rtpmap:96 PS/90000\r\n\
                        a=sendonly\r\n";
@@ -325,6 +343,7 @@ mod tests {
         assert_eq!(session.version, 0);
         assert_eq!(session.session_id, "34020000001320000001");
         assert_eq!(session.connection.address, "192.168.1.200");
+        assert_eq!(session.ssrc, Some(1234));
         assert_eq!(session.media.len(), 1);
         
         let media = &session.media[0];

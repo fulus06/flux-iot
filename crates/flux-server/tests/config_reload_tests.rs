@@ -200,8 +200,9 @@ async fn test_postgres_config_hot_reload_optional() -> anyhow::Result<()> {
 #[test]
 fn test_gb28181_auth_config_mapping() {
     use flux_server::config::{
-        DatabaseConfig, EventBusConfig, Gb28181Config, Gb28181SipAuthConfig, Gb28181SipConfig,
-        LoggingConfig, MqttConfig, PluginConfig, RegisterAuthModeConfig, ServerConfig,
+        DatabaseConfig, EventBusConfig, Gb28181Backend, Gb28181Config, Gb28181SipAuthConfig,
+        Gb28181SipConfig, LoggingConfig, MqttConfig, PluginConfig, RegisterAuthModeConfig,
+        ServerConfig,
     };
 
     let cfg = AppConfig {
@@ -220,6 +221,8 @@ fn test_gb28181_auth_config_mapping() {
         logging: LoggingConfig::default(),
         gb28181: Gb28181Config {
             enabled: true,
+            backend: Gb28181Backend::Embedded,
+            remote: Default::default(),
             sip: Gb28181SipConfig {
                 bind_addr: Some("0.0.0.0:5060".to_string()),
                 sip_domain: Some("3402000000".to_string()),

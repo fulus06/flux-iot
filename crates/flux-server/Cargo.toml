@@ -22,6 +22,7 @@ config = "0.13"
 anyhow = "1.0"
 sha2 = "0.10"
 hex = "0.4"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
 flux-types = { version = "0.1.0", path = "../flux-types" }
 flux-mqtt = { path = "../flux-mqtt" }

@@ -42,6 +42,9 @@ pub struct SipSession {
     
     /// 远端 SDP
     pub remote_sdp: Option<String>,
+
+    /// SSRC（GB28181 SDP y= 行）
+    pub ssrc: Option<u32>,
     
     /// RTP 端口
     pub rtp_port: Option<u16>,
@@ -65,6 +68,7 @@ impl SipSession {
             updated_at: now,
             local_sdp: None,
             remote_sdp: None,
+            ssrc: None,
             rtp_port: None,
             rtcp_port: None,
             cseq: 1,
@@ -88,6 +92,18 @@ impl SipSession {
     pub fn set_rtp_ports(&mut self, rtp: u16, rtcp: u16) {
         self.rtp_port = Some(rtp);
         self.rtcp_port = Some(rtcp);
+        self.updated_at = Utc::now();
+    }
+
+    /// 设置通道 ID
+    pub fn set_channel_id(&mut self, channel_id: String) {
+        self.channel_id = Some(channel_id);
+        self.updated_at = Utc::now();
+    }
+
+    /// 设置 SSRC
+    pub fn set_ssrc(&mut self, ssrc: u32) {
+        self.ssrc = Some(ssrc);
         self.updated_at = Utc::now();
     }
     
@@ -191,6 +207,30 @@ impl SessionManager {
         
         if let Some(session) = sessions.get_mut(session_id) {
             session.set_rtp_ports(rtp, rtcp);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 设置通道 ID
+    pub async fn set_channel_id(&self, session_id: &str, channel_id: String) -> bool {
+        let mut sessions = self.sessions.write().await;
+
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.set_channel_id(channel_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 设置 SSRC
+    pub async fn set_ssrc(&self, session_id: &str, ssrc: u32) -> bool {
+        let mut sessions = self.sessions.write().await;
+
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.set_ssrc(ssrc);
             true
         } else {
             false

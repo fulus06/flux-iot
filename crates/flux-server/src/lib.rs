@@ -2,6 +2,7 @@
 pub mod config;
 pub mod config_provider;
 pub mod config_manager;
+pub mod gb28181_backend;
 
 use flux_core::bus::EventBus;
 use flux_plugin::PluginManager;
@@ -10,6 +11,7 @@ use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tokio::sync::watch;
 use flux_video::gb28181::sip::SipServer;
+use crate::gb28181_backend::Gb28181BackendRef;
 
 // 重新导出配置类型
 pub use config::AppConfig;
@@ -23,6 +25,7 @@ pub struct AppState {
     pub config_db: Option<DatabaseConnection>,
     pub config: watch::Receiver<AppConfig>,
     pub gb28181_sip: Option<Arc<SipServer>>,
+    pub gb28181_backend: Option<Gb28181BackendRef>,
 }
 
 // 为了测试，重新导出 api 模块的关键类型和函数

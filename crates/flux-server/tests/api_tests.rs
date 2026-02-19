@@ -44,6 +44,7 @@ async fn create_test_state() -> Arc<AppState> {
         config_db: None,
         config: rx,
         gb28181_sip: None,
+        gb28181_backend: None,
     })
 }
 

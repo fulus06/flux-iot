@@ -1,9 +1,10 @@
 use crate::{metrics, AppState};
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, HeaderValue},
     http::StatusCode,
     response::IntoResponse,
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -21,40 +22,439 @@ pub struct EventRequest {
     pub payload: Value,
 }
 
-fn gb_device_to_json(device: &flux_video::gb28181::sip::Device) -> serde_json::Value {
-    let status = match device.status {
-        flux_video::gb28181::sip::DeviceStatus::Online => "online",
-        flux_video::gb28181::sip::DeviceStatus::Offline => "offline",
-        flux_video::gb28181::sip::DeviceStatus::Registering => "registering",
+pub async fn gb_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(stream_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable().into_response();
     };
 
-    serde_json::json!({
-        "device_id": device.device_id,
-        "name": device.name,
-        "ip": device.ip,
-        "port": device.port,
-        "status": status,
-        "register_time_ms": device.register_time.timestamp_millis(),
-        "last_keepalive_ms": device.last_keepalive.timestamp_millis(),
-        "expires": device.expires,
-        "transport": device.transport,
-        "manufacturer": device.manufacturer,
-        "model": device.model,
-        "firmware": device.firmware,
-    })
+    match backend.snapshot(&stream_id).await {
+        Ok(Some(bytes)) => {
+            let mut resp: Response = bytes.into_response();
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            resp
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "snapshot not found" })),
+        )
+            .into_response(),
+        Err(e) => map_backend_error(e).into_response(),
+    }
 }
 
-fn gb_channel_to_json(channel: &flux_video::gb28181::sip::Channel) -> serde_json::Value {
-    serde_json::json!({
-        "channel_id": channel.channel_id,
-        "name": channel.name,
-        "manufacturer": channel.manufacturer,
-        "model": channel.model,
-        "status": channel.status,
-        "parent_id": channel.parent_id,
-        "longitude": channel.longitude,
-        "latitude": channel.latitude,
-    })
+fn gb_backend_unavailable() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "gb28181 backend is not configured" })),
+    )
+}
+
+fn map_backend_error(e: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
+    let msg = e.to_string();
+    let status = if msg.contains("404") || msg.to_ascii_lowercase().contains("not found") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(serde_json::json!({ "error": msg })))
+}
+
+#[cfg(test)]
+mod gateway_e2e_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use hyper::body::to_bytes;
+    use tokio::net::UdpSocket;
+    use flux_video::gb28181::sip::{SipServer, SipServerConfig};
+    use flux_video::gb28181::rtp::receiver::RtpReceiverConfig;
+    use flux_video::gb28181::rtp::RtpReceiver;
+    use flux_video::snapshot::KeyframeExtractor;
+    use flux_video::storage::StandaloneStorage;
+    use tokio::sync::RwLock;
+    use tokio::sync::oneshot;
+    use tower::ServiceExt;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn test_gateway_e2e_snapshot_via_remote_gb28181d() {
+        #[derive(Clone)]
+        struct GbState {
+            sip: Arc<SipServer>,
+            rtp: Arc<RtpReceiver>,
+            storage: Arc<RwLock<StandaloneStorage>>, 
+            extractor: Arc<RwLock<KeyframeExtractor>>,
+            streams: Arc<RwLock<std::collections::HashMap<String, Arc<GbProc>>>>,
+        }
+
+        struct GbProc {
+            stream_id: String,
+            ssrc: u32,
+            rtp: Arc<RtpReceiver>,
+            storage: Arc<RwLock<StandaloneStorage>>,
+            extractor: Arc<RwLock<KeyframeExtractor>>,
+            latest: Arc<RwLock<Option<String>>>,
+            running: Arc<RwLock<bool>>,
+        }
+
+        impl GbProc {
+            async fn start(self: Arc<Self>) {
+                {
+                    let mut running = self.running.write().await;
+                    *running = true;
+                }
+                
+                let mut rx = self.rtp.register_stream(self.ssrc).await;
+                let proc2 = self.clone();
+                tokio::spawn(async move {
+                    let mut demux = flux_video::gb28181::ps::PsDemuxer::new();
+                    let mut frame_buffer = Vec::new();
+                    
+                    while *proc2.running.read().await {
+                        let timeout_result = tokio::time::timeout(
+                            tokio::time::Duration::from_secs(10),
+                            rx.recv()
+                        ).await;
+                        
+                        match timeout_result {
+                            Ok(Some(packet)) => {
+                                demux.input(packet.payload().clone());
+                                while let Some(video) = demux.pop_video() {
+                                    frame_buffer.extend_from_slice(&video);
+                                    if packet.is_marker() && !frame_buffer.is_empty() {
+                                        let ts = chrono::Utc::now();
+                                        let bytes = axum::body::Bytes::copy_from_slice(&frame_buffer);
+                                        {
+                                            let mut st = proc2.storage.write().await;
+                                            let _ = st.put_object(&proc2.stream_id, ts, bytes).await;
+                                        }
+                                        {
+                                            let mut ex = proc2.extractor.write().await;
+                                            if let Ok(Some(kf)) = ex.process(&proc2.stream_id, &frame_buffer, ts).await {
+                                                let path = kf.file_path.clone();
+                                                let mut latest = proc2.latest.write().await;
+                                                *latest = Some(kf.file_path);
+                                                eprintln!("Keyframe extracted: {}", path);
+                                            }
+                                        }
+                                        frame_buffer.clear();
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                eprintln!("RTP recv timeout for stream {}", proc2.stream_id);
+                            }
+                        }
+                    }
+                    eprintln!("Stream processor stopped for {}", proc2.stream_id);
+                });
+            }
+
+            async fn latest_path(&self) -> Option<String> {
+                self.latest.read().await.clone()
+            }
+        }
+
+        async fn gb_invite(
+            State(state): State<GbState>,
+            Json(req): Json<super::GbInviteRequest>,
+        ) -> impl IntoResponse {
+            let stream_id = format!("gb28181/{}/{}", req.device_id, req.channel_id);
+            let call_id = match state
+                .sip
+                .start_realtime_play(&req.device_id, &req.channel_id, req.rtp_port)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                }
+            };
+
+            let session = match state.sip.session_manager().get_session(&call_id).await {
+                Some(v) => v,
+                None => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": "session not found"})),
+                    )
+                }
+            };
+
+            let ssrc = match session.ssrc {
+                Some(v) => v,
+                None => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": "ssrc not found"})),
+                    )
+                }
+            };
+
+            let proc = Arc::new(GbProc {
+                stream_id: stream_id.clone(),
+                ssrc,
+                rtp: state.rtp.clone(),
+                storage: state.storage.clone(),
+                extractor: state.extractor.clone(),
+                latest: Arc::new(RwLock::new(None)),
+                running: Arc::new(RwLock::new(false)),
+            });
+            
+            {
+                let mut map = state.streams.write().await;
+                map.insert(stream_id.clone(), proc.clone());
+            }
+            
+            proc.start().await;
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"call_id": call_id, "stream_id": stream_id, "ssrc": ssrc})),
+            )
+        }
+
+        async fn gb_snapshot(
+            State(state): State<GbState>,
+            Path(stream_id): Path<String>,
+        ) -> impl IntoResponse {
+            let map = state.streams.read().await;
+            let Some(proc) = map.get(&stream_id) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let Some(path) = proc.latest_path().await else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let data = match tokio::fs::read(&path).await {
+                Ok(v) => v,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            let mut resp: Response = axum::body::Bytes::from(data).into_response();
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            resp
+        }
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let storage_dir = temp_dir.path().join("storage");
+        let keyframe_dir = temp_dir.path().join("keyframes");
+
+        let storage = Arc::new(RwLock::new(
+            StandaloneStorage::new(storage_dir).expect("storage"),
+        ));
+        let extractor = Arc::new(RwLock::new(
+            KeyframeExtractor::new(keyframe_dir).with_interval(0),
+        ));
+
+        let rtp = Arc::new(
+            RtpReceiver::new(RtpReceiverConfig {
+                bind_addr: "127.0.0.1:0".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("rtp"),
+        );
+        let rtp_addr = rtp.local_addr().expect("rtp addr");
+        let rtp_task = rtp.clone();
+        tokio::spawn(async move {
+            let _ = rtp_task.start().await;
+        });
+
+        let mut sip_cfg = SipServerConfig::default();
+        sip_cfg.bind_addr = "127.0.0.1:0".to_string();
+        let sip = Arc::new(SipServer::new(sip_cfg).await.expect("sip"));
+        let sip_addr = sip.local_addr().expect("sip addr");
+        let sip_task = sip.clone();
+        tokio::spawn(async move {
+            let _ = sip_task.start().await;
+        });
+
+        let gb_state = GbState {
+            sip,
+            rtp,
+            storage,
+            extractor,
+            streams: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        };
+
+        let gb_app = Router::new()
+            .route("/api/v1/gb28181/invite", post(gb_invite))
+            .route(
+                "/api/v1/gb28181/streams/:stream_id/snapshot",
+                get(gb_snapshot),
+            )
+            .with_state(gb_state);
+
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let gb_addr = std_listener.local_addr().expect("addr");
+        std_listener.set_nonblocking(true).expect("nb");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let server = axum::Server::from_tcp(std_listener)
+                .expect("from_tcp")
+                .serve(gb_app.into_make_service())
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                });
+            let _ = server.await;
+        });
+        let base_url = format!("http://{}", gb_addr);
+
+        let gateway_state = super::tests::create_test_state_with_remote_backend(base_url).await;
+        let gateway = crate::api::create_router(gateway_state);
+
+        let dev_sock = UdpSocket::bind("127.0.0.1:0").await.expect("dev sock");
+        let dev_local = dev_sock.local_addr().expect("dev local");
+        let device_id = "34020000001320000001";
+        let reg = format!(
+            "REGISTER sip:3402000000 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{};branch=z9hG4bK1\r\n\
+From: <sip:{}@3402000000>;tag=1\r\n\
+To: <sip:{}@3402000000>\r\n\
+Call-ID: 1@test\r\n\
+CSeq: 1 REGISTER\r\n\
+Expires: 3600\r\n\
+Content-Length: 0\r\n\
+\r\n",
+            dev_local.port(),
+            device_id,
+            device_id,
+        );
+        dev_sock.send_to(reg.as_bytes(), sip_addr).await.expect("reg");
+        let mut buf = vec![0u8; 8192];
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), dev_sock.recv_from(&mut buf))
+            .await
+            .expect("reg resp");
+
+        let invite_body = serde_json::json!({
+            "device_id": device_id,
+            "channel_id": device_id,
+            "rtp_port": rtp_addr.port(),
+        });
+        let req = Request::builder()
+            .uri("/api/v1/gb28181/invite")
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(invite_body.to_string()))
+            .expect("req");
+        let resp = gateway.clone().oneshot(req).await.expect("invite resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let _call_id = v.get("call_id").and_then(|x| x.as_str()).expect("call_id");
+        let stream_id = format!("gb28181/{}/{}", device_id, device_id);
+
+        let (n, from) = tokio::time::timeout(tokio::time::Duration::from_secs(2), dev_sock.recv_from(&mut buf))
+            .await
+            .expect("invite")
+            .expect("invite recv");
+        let invite_txt = String::from_utf8_lossy(&buf[..n]);
+        let invite_req = flux_video::gb28181::sip::SipRequest::from_string(&invite_txt).expect("invite parse");
+        
+        let sdp = invite_req.body.as_deref().expect("sdp");
+        let sdp_sess = flux_video::gb28181::sip::SdpSession::from_string(sdp).expect("parse sdp");
+        let ssrc = sdp_sess.ssrc.expect("ssrc");
+        let ok200 = format!(
+            "SIP/2.0 200 OK\r\n\
+Via: {}\r\n\
+From: {}\r\n\
+To: {}\r\n\
+Call-ID: {}\r\n\
+CSeq: {}\r\n\
+Content-Length: 0\r\n\
+\r\n",
+            invite_req.headers.get("Via").cloned().unwrap_or_default(),
+            invite_req.headers.get("From").cloned().unwrap_or_default(),
+            invite_req.headers.get("To").cloned().unwrap_or_default(),
+            invite_req.headers.get("Call-ID").cloned().unwrap_or_default(),
+            invite_req.headers.get("CSeq").cloned().unwrap_or_default(),
+        );
+        dev_sock.send_to(ok200.as_bytes(), sip_addr).await.expect("200ok");
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), dev_sock.recv_from(&mut buf))
+            .await
+            .expect("ack");
+
+        let h264 = {
+            let mut data = Vec::new();
+            data.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0xe9]);
+            data.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80]);
+            data.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x10]);
+            data.extend_from_slice(&vec![0xAA; 64]);
+            data
+        };
+        let pes = {
+            let mut out = Vec::new();
+            let pes_len = 3usize + h264.len();
+            let pes_len_u16 = u16::try_from(pes_len).unwrap_or(u16::MAX);
+            out.extend_from_slice(&[0x00, 0x00, 0x01, 0xE0]);
+            out.extend_from_slice(&pes_len_u16.to_be_bytes());
+            out.extend_from_slice(&[0x80, 0x00, 0x00]);
+            out.extend_from_slice(&h264);
+            out
+        };
+        let mut rtp_pkt = Vec::new();
+        rtp_pkt.extend_from_slice(&[0x80, 0xE0]);
+        rtp_pkt.extend_from_slice(&1u16.to_be_bytes());
+        rtp_pkt.extend_from_slice(&100u32.to_be_bytes());
+        rtp_pkt.extend_from_slice(&ssrc.to_be_bytes());
+        rtp_pkt.extend_from_slice(&pes);
+
+        let rtp_target: SocketAddr = format!("127.0.0.1:{}", rtp_addr.port()).parse().expect("rtp");
+        
+        eprintln!("Sending RTP packets to {} with ssrc={}", rtp_target, ssrc);
+        // 发送多帧以确保至少有一帧能成功触发 keyframe 提取
+        for i in 0..10 {
+            let mut pkt = Vec::new();
+            pkt.extend_from_slice(&[0x80, 0xE0]);
+            pkt.extend_from_slice(&((i + 1) as u16).to_be_bytes());
+            pkt.extend_from_slice(&((100 + i * 100) as u32).to_be_bytes());
+            pkt.extend_from_slice(&ssrc.to_be_bytes());
+            pkt.extend_from_slice(&pes);
+            dev_sock.send_to(&pkt, rtp_target).await.expect("rtp send");
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        
+        eprintln!("Waiting for keyframe extraction...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        let mut ok = false;
+        for attempt in 0..60 {
+            let req = Request::builder()
+                .uri(format!(
+                    "/api/v1/gb28181/streams/{}/snapshot",
+                    stream_id.replace("/", "%2F")
+                ))
+                .method("GET")
+                .body(Body::empty())
+                .expect("snap req");
+            let resp = gateway.clone().oneshot(req).await.expect("snap resp");
+            eprintln!("attempt {} status={}", attempt, resp.status());
+            if resp.status() == StatusCode::OK {
+                let body = to_bytes(resp.into_body()).await.expect("snap body");
+                eprintln!("snapshot body len={}", body.len());
+                assert!(!body.is_empty());
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        let _ = shutdown_tx.send(());
+        let _ = from;
+        assert!(ok, "gateway E2E: snapshot never returned 200 OK");
+    }
 }
 
 pub async fn get_app_config_audit(
@@ -209,6 +609,12 @@ fn check_reload_policy(old_cfg: &flux_server::AppConfig, new_cfg: &flux_server::
     if old_cfg.gb28181.enabled != new_cfg.gb28181.enabled {
         blocked.push("gb28181.enabled");
     }
+    if old_cfg.gb28181.backend != new_cfg.gb28181.backend {
+        blocked.push("gb28181.backend");
+    }
+    if old_cfg.gb28181.remote.base_url != new_cfg.gb28181.remote.base_url {
+        blocked.push("gb28181.remote.base_url");
+    }
     if old_cfg.gb28181.sip.bind_addr != new_cfg.gb28181.sip.bind_addr {
         blocked.push("gb28181.sip.bind_addr");
     }
@@ -260,40 +666,20 @@ pub struct GbDeviceRequest {
     pub device_id: String,
 }
 
-fn gb_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({ "error": "gb28181 sip service is not enabled" })),
-    )
-}
-
-fn map_video_error(e: flux_video::VideoError) -> (StatusCode, Json<serde_json::Value>) {
-    let msg = e.to_string();
-    let status = if msg.to_ascii_lowercase().contains("not found") {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-    (status, Json(serde_json::json!({ "error": msg })))
-}
-
 pub async fn gb_invite(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GbInviteRequest>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip
-        .start_realtime_play(&req.device_id, &req.channel_id, req.rtp_port)
+    match backend
+        .invite(&req.device_id, &req.channel_id, req.rtp_port)
         .await
     {
-        Ok(call_id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "call_id": call_id })),
-        ),
-        Err(e) => map_video_error(e),
+        Ok(call_id) => (StatusCode::OK, Json(serde_json::json!({ "call_id": call_id }))),
+        Err(e) => map_backend_error(e),
     }
 }
 
@@ -301,13 +687,13 @@ pub async fn gb_bye(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GbByeRequest>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip.stop_realtime_play(&req.call_id).await {
+    match backend.bye(&req.call_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),
-        Err(e) => map_video_error(e),
+        Err(e) => map_backend_error(e),
     }
 }
 
@@ -315,13 +701,13 @@ pub async fn gb_query_catalog(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GbDeviceRequest>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip.query_catalog(&req.device_id).await {
+    match backend.query_catalog(&req.device_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),
-        Err(e) => map_video_error(e),
+        Err(e) => map_backend_error(e),
     }
 }
 
@@ -329,13 +715,13 @@ pub async fn gb_query_device_info(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GbDeviceRequest>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip.query_device_info(&req.device_id).await {
+    match backend.query_device_info(&req.device_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),
-        Err(e) => map_video_error(e),
+        Err(e) => map_backend_error(e),
     }
 }
 
@@ -343,43 +729,42 @@ pub async fn gb_query_device_status(
     State(state): State<Arc<AppState>>,
     Json(req): Json<GbDeviceRequest>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip.query_device_status(&req.device_id).await {
+    match backend.query_device_status(&req.device_id).await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),
-        Err(e) => map_video_error(e),
+        Err(e) => map_backend_error(e),
     }
 }
 
 pub async fn gb_list_devices(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    let devices = sip.device_manager().list_devices().await;
-    let devices: Vec<serde_json::Value> = devices.iter().map(gb_device_to_json).collect();
-    (StatusCode::OK, Json(serde_json::json!({ "devices": devices })))
+    match backend.list_devices().await {
+        Ok(devices) => (StatusCode::OK, Json(serde_json::json!({ "devices": devices }))),
+        Err(e) => map_backend_error(e),
+    }
 }
 
 pub async fn gb_get_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip.device_manager().get_device(&device_id).await {
-        Some(device) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "device": gb_device_to_json(&device) })),
-        ),
-        None => (
+    match backend.get_device(&device_id).await {
+        Ok(Some(device)) => (StatusCode::OK, Json(serde_json::json!({ "device": device }))),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "device not found" })),
         ),
+        Err(e) => map_backend_error(e),
     }
 }
 
@@ -387,20 +772,17 @@ pub async fn gb_list_device_channels(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(sip) = state.gb28181_sip.as_ref() else {
-        return gb_unavailable();
+    let Some(backend) = state.gb28181_backend.as_ref() else {
+        return gb_backend_unavailable();
     };
 
-    match sip.device_manager().get_device(&device_id).await {
-        Some(device) => {
-            let channels: Vec<serde_json::Value> =
-                device.channels.iter().map(gb_channel_to_json).collect();
-            (StatusCode::OK, Json(serde_json::json!({ "channels": channels })))
-        }
-        None => (
+    match backend.list_device_channels(&device_id).await {
+        Ok(Some(channels)) => (StatusCode::OK, Json(serde_json::json!({ "channels": channels }))),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "device not found" })),
         ),
+        Err(e) => map_backend_error(e),
     }
 }
 
@@ -953,6 +1335,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(gb_list_device_channels),
         )
         .route(
+            "/api/v1/gb28181/streams/:stream_id/snapshot",
+            get(gb_snapshot),
+        )
+        .route(
             "/api/v1/app-config",
             get(get_app_config).post(update_app_config),
         )
@@ -963,13 +1349,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, body::Bytes, http::Request};
+    use flux_server::gb28181_backend::{Gb28181BackendRef, RemoteBackend};
     use flux_core::bus::EventBus;
     use flux_plugin::manager::PluginManager;
     use flux_script::ScriptEngine;
+    use hyper::body::to_bytes;
     use sea_orm::Database;
     use std::sync::Once;
     use tokio::sync::watch;
+    use tokio::sync::oneshot;
+    use tokio::net::UdpSocket;
+    use flux_video::gb28181::sip::SipServer;
+    use flux_video::gb28181::sip::SipServerConfig;
+    use flux_video::gb28181::rtp::receiver::RtpReceiverConfig;
+    use flux_video::gb28181::rtp::RtpReceiver;
+    use flux_video::snapshot::KeyframeExtractor;
+    use flux_video::storage::StandaloneStorage;
+    use tokio::sync::RwLock;
     use tower::ServiceExt;
 
     static INIT: Once = Once::new();
@@ -1001,7 +1398,92 @@ mod tests {
             config_db: Some(config_db),
             config: rx,
             gb28181_sip: None,
+            gb28181_backend: None,
         })
+    }
+
+    pub(crate) async fn create_test_state_with_remote_backend(base_url: String) -> Arc<AppState> {
+        let event_bus = Arc::new(EventBus::new(100));
+        let plugin_manager = Arc::new(PluginManager::new().expect("plugin manager"));
+        let script_engine = Arc::new(ScriptEngine::new());
+        let db = Database::connect("sqlite::memory:").await.expect("db");
+
+        let (_tx, rx) = watch::channel(flux_server::AppConfig::default());
+
+        let backend: Gb28181BackendRef = Arc::new(RemoteBackend::new(base_url));
+
+        Arc::new(AppState {
+            event_bus,
+            plugin_manager,
+            script_engine,
+            db,
+            config_db: None,
+            config: rx,
+            gb28181_sip: None,
+            gb28181_backend: Some(backend),
+        })
+    }
+
+    async fn spawn_mock_gb28181_http() -> (String, oneshot::Sender<()>) {
+        async fn snapshot(Path(stream_id): Path<String>) -> impl IntoResponse {
+            if stream_id == "missing" {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+
+            let mut resp: Response = Bytes::from_static(b"snapshot-bytes").into_response();
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            resp
+        }
+
+        async fn channels(Path(device_id): Path<String>) -> Response {
+            if device_id == "missing" {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+
+            Json(serde_json::json!({
+                "channels": [
+                    {
+                        "channel_id": "c1",
+                        "name": "ch",
+                        "status": "ON"
+                    }
+                ]
+            }))
+            .into_response()
+        }
+
+        let app = Router::new()
+            .route(
+                "/api/v1/gb28181/streams/:stream_id/snapshot",
+                get(snapshot),
+            )
+            .route(
+                "/api/v1/gb28181/devices/:device_id/channels",
+                get(channels),
+            );
+
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = std_listener.local_addr().expect("addr");
+        std_listener
+            .set_nonblocking(true)
+            .expect("set_nonblocking");
+
+        let (tx, rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let server = axum::Server::from_tcp(std_listener)
+                .expect("from_tcp")
+                .serve(app.into_make_service())
+                .with_graceful_shutdown(async move {
+                    let _ = rx.await;
+                });
+
+            let _ = server.await;
+        });
+
+        (format!("http://{}", addr), tx)
     }
 
     fn minimal_app_config_toml() -> String {
@@ -1118,5 +1600,66 @@ directory = "plugins"
 
         let resp = app.oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_gb28181_remote_snapshot_success() {
+        let (base_url, shutdown) = spawn_mock_gb28181_http().await;
+        let state = create_test_state_with_remote_backend(base_url).await;
+        let app = create_router(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/gb28181/streams/s1/snapshot")
+            .method("GET")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        assert_eq!(&body[..], b"snapshot-bytes");
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn test_gb28181_remote_snapshot_not_found() {
+        let (base_url, shutdown) = spawn_mock_gb28181_http().await;
+        let state = create_test_state_with_remote_backend(base_url).await;
+        let app = create_router(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/gb28181/streams/missing/snapshot")
+            .method("GET")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn test_gb28181_remote_channels_shape() {
+        let (base_url, shutdown) = spawn_mock_gb28181_http().await;
+        let state = create_test_state_with_remote_backend(base_url).await;
+        let app = create_router(state);
+
+        let req = Request::builder()
+            .uri("/api/v1/gb28181/devices/d1/channels")
+            .method("GET")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body()).await.expect("body");
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(v.get("channels").is_some());
+
+        let _ = shutdown.send(());
     }
 }

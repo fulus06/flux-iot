@@ -13,6 +13,8 @@ use flux_video::gb28181::sip::SipServer;
 use flux_server::{AppConfig, AppState};
 use flux_server::config_provider::{AppConfigProvider, DbConfigProvider, FileConfigProvider};
 use flux_server::config_manager::ConfigManager;
+use flux_server::config::Gb28181Backend;
+use flux_server::gb28181_backend::{EmbeddedBackend, Gb28181BackendRef, RemoteBackend};
 
 mod api;
 mod auth;
@@ -199,13 +201,32 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Plugin directory not found: {}", plugin_dir);
     }
 
-    // Prepare optional GB28181 SIP server
-    let gb28181_sip: Option<Arc<SipServer>> = if app_config.gb28181.enabled {
-        let sip_cfg = app_config.gb28181_sip_server_config();
-        Some(Arc::new(SipServer::new(sip_cfg).await?))
-    } else {
-        None
-    };
+    // Prepare optional GB28181 backend (embedded or remote)
+    let (gb28181_sip, gb28181_backend): (Option<Arc<SipServer>>, Option<Gb28181BackendRef>) =
+        if !app_config.gb28181.enabled {
+            (None, None)
+        } else {
+            match app_config.gb28181.backend {
+                Gb28181Backend::Embedded => {
+                    let sip_cfg = app_config.gb28181_sip_server_config();
+                    let sip = Arc::new(SipServer::new(sip_cfg).await?);
+                    let backend: Gb28181BackendRef = Arc::new(EmbeddedBackend::new(sip.clone()));
+                    (Some(sip), Some(backend))
+                }
+                Gb28181Backend::Remote => {
+                    let base_url = app_config
+                        .gb28181
+                        .remote
+                        .base_url
+                        .clone()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("gb28181.remote.base_url is required when backend=remote")
+                        })?;
+                    let backend: Gb28181BackendRef = Arc::new(RemoteBackend::new(base_url));
+                    (None, Some(backend))
+                }
+            }
+        };
 
     let state = Arc::new(AppState {
         event_bus: event_bus.clone(),
@@ -215,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
         config_db,
         config: config_rx,
         gb28181_sip: gb28181_sip.clone(),
+        gb28181_backend: gb28181_backend.clone(),
     });
 
     // 3. Initialize Metrics Exporter
@@ -229,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
     // 4. Start API Server (Axum)
     let app = api::create_router(state.clone());
 
-    // 4.1 Start GB28181 SIP Server (optional)
+    // 4.1 Start GB28181 SIP Server (embedded only)
     if let Some(sip) = gb28181_sip {
         let sip_task = sip.clone();
         tokio::spawn(async move {

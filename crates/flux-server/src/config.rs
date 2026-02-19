@@ -22,7 +22,29 @@ pub struct Gb28181Config {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    pub backend: Gb28181Backend,
+    #[serde(default)]
+    pub remote: Gb28181RemoteConfig,
+    #[serde(default)]
     pub sip: Gb28181SipConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Gb28181Backend {
+    Embedded,
+    Remote,
+}
+
+impl Default for Gb28181Backend {
+    fn default() -> Self {
+        Self::Embedded
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct Gb28181RemoteConfig {
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

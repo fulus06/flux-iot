@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +107,12 @@ impl SipServer {
             session_manager: Arc::new(SessionManager::new()),
             socket: Arc::new(socket),
         })
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.socket
+            .local_addr()
+            .map_err(|e| crate::VideoError::Other(format!("Failed to get SIP local_addr: {}", e)))
     }
 
     pub async fn update_register_auth(
@@ -564,8 +571,71 @@ impl SipServer {
     }
     
     /// 处理 SIP 响应
-    async fn handle_response(&self, _resp: SipResponse, _addr: SocketAddr) -> Result<()> {
-        // 处理响应（如果需要）
+    async fn handle_response(&self, resp: SipResponse, addr: SocketAddr) -> Result<()> {
+        // 目前只处理 INVITE 的 200 OK，用于自动发送 ACK。
+        let Some(call_id) = resp.headers.get("Call-ID") else {
+            return Ok(());
+        };
+
+        let Some(cseq) = resp.headers.get("CSeq") else {
+            return Ok(());
+        };
+
+        // 例："1 INVITE"
+        let mut cseq_parts = cseq.split_whitespace();
+        let cseq_num_str = cseq_parts.next().unwrap_or("1");
+        let cseq_method = cseq_parts.next().unwrap_or("");
+
+        if resp.status_code != 200 || !cseq_method.eq_ignore_ascii_case("INVITE") {
+            return Ok(());
+        }
+
+        let cseq_num: u32 = cseq_num_str.parse().unwrap_or(1);
+
+        let session_opt = self.session_manager.get_session(call_id).await;
+        let Some(session) = session_opt else {
+            return Ok(());
+        };
+
+        let Some(channel_id) = session.channel_id.as_deref() else {
+            return Ok(());
+        };
+
+        let device_opt = self.device_manager.get_device(&session.device_id).await;
+        let Some(device) = device_opt else {
+            return Ok(());
+        };
+
+        let mut ack = SipRequest::new(
+            SipMethod::Ack,
+            format!("sip:{}@{}:{}", channel_id, device.ip, device.port),
+        );
+
+        // 尽量复制必要头部
+        if let Some(via) = resp.headers.get("Via") {
+            ack.add_header("Via".to_string(), via.clone());
+        }
+        if let Some(from) = resp.headers.get("From") {
+            ack.add_header("From".to_string(), from.clone());
+        }
+        if let Some(to) = resp.headers.get("To") {
+            ack.add_header("To".to_string(), to.clone());
+        }
+        ack.add_header("Call-ID".to_string(), call_id.clone());
+        ack.add_header("CSeq".to_string(), format!("{} ACK", cseq_num));
+        ack.add_header("Max-Forwards".to_string(), "70".to_string());
+
+        let data = ack.to_string();
+        self.socket
+            .send_to(data.as_bytes(), addr)
+            .await
+            .map_err(|e| crate::VideoError::Other(format!("Failed to send ACK: {}", e)))?;
+
+        self.session_manager
+            .update_session_state(call_id, SessionState::Established)
+            .await;
+
+        tracing::info!(target: "gb28181::sip", call_id = %call_id, "INVITE 200 OK received, ACK sent");
         Ok(())
     }
     
@@ -647,6 +717,8 @@ impl SipServer {
             self.config.sip_id.clone(),
             ip.to_string(),
         );
+
+        sdp_session.ssrc = session.ssrc;
         
         sdp_session.add_video(rtp_port);
         
@@ -736,9 +808,24 @@ impl SipServer {
         
         // 创建会话
         let mut session = self.session_manager.create_session(call_id.clone(), device_id.to_string()).await;
-        session.channel_id = Some(channel_id.to_string());
-        session.rtp_port = Some(rtp_port);
-        session.rtcp_port = Some(rtp_port + 1);
+
+        // 生成 SSRC（递增即可，保持简单；由上层保证生命周期内唯一）
+        static SSRC_COUNTER: AtomicU32 = AtomicU32::new(1_000_000_000);
+        let ssrc = SSRC_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        session.set_channel_id(channel_id.to_string());
+        session.set_rtp_ports(rtp_port, rtp_port + 1);
+        session.set_ssrc(ssrc);
+
+        let _ = self
+            .session_manager
+            .set_channel_id(&call_id, channel_id.to_string())
+            .await;
+        let _ = self
+            .session_manager
+            .set_rtp_ports(&call_id, rtp_port, rtp_port + 1)
+            .await;
+        let _ = self.session_manager.set_ssrc(&call_id, ssrc).await;
         
         // 生成本地 SDP
         let local_sdp = self.generate_sdp(&session).await;

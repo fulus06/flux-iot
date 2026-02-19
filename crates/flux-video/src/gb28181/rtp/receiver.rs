@@ -67,6 +67,12 @@ impl RtpReceiver {
             streams: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         })
     }
+
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.socket
+            .local_addr()
+            .map_err(|e| crate::VideoError::Other(format!("Failed to get RTP local_addr: {}", e)))
+    }
     
     /// 启动接收器
     pub async fn start(self: Arc<Self>) -> Result<()> {
