@@ -1,0 +1,30 @@
+[package]
+name = "flux-rtmpd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "flux-rtmpd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-stream = "0.3"
+async-trait = "0.1"
+axum = "0.7"
+bytes = "1.5"
+chrono = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+flux-media-core = { path = "../flux-media-core" }
+futures = "0.3"
+rml_rtmp = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tower = "0.4"
+hyper = "0.14"

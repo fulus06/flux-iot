@@ -69,6 +69,26 @@ pub enum VideoCodec {
     Unknown,
 }
 
+/// 音频样本（协议无关）
+#[derive(Debug, Clone)]
+pub struct AudioSample {
+    pub data: Bytes,
+    pub timestamp: DateTime<Utc>,
+    pub pts: Option<i64>,
+    pub codec: AudioCodec,
+    pub sample_rate: u32,
+    pub channels: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    AAC,
+    MP3,
+    Opus,
+    PCM,
+    Unknown,
+}
+
 /// 关键帧信息
 #[derive(Debug, Clone)]
 pub struct KeyframeInfo {
