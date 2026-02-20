@@ -123,12 +123,53 @@
 
 ### 3. 生产环境特性
 
-#### 3.1 监控和告警完善
-- [ ] Prometheus 指标完善（延迟分位数、吞吐量、资源使用率）
-- [ ] Grafana Dashboard 模板
-- [ ] 实时告警规则引擎
-- [ ] 多通知渠道（webhook、邮件、钉钉）
-- [ ] 告警聚合与降噪
+#### 3.1 监控和告警完善（完成度 100%）✅
+**详细规划**：`docs/monitoring_alerting_plan.md`
+
+**阶段 1：指标收集（40%）✅**
+- [x] 创建 flux-metrics crate
+- [x] Prometheus 指标完善（延迟分位数、吞吐量、资源使用率）
+- [x] MetricsCollector 实现（18+ 指标类型）
+- [x] SystemMetricsCollector（CPU/内存/磁盘）
+- [x] Grafana Dashboard 模板（系统概览）
+- [x] Prometheus 告警规则（系统/应用/业务）
+
+**阶段 2：告警引擎（30%）✅**
+- [x] 实时告警规则引擎（AlertEngine）
+- [x] 阈值规则（ThresholdRule）
+- [x] 自定义规则接口（AlertRule trait）
+- [x] 告警状态管理（Firing/Resolved）
+- [x] 告警历史记录
+
+**阶段 3：通知渠道（20%）✅**
+- [x] Webhook 通知器
+- [x] 钉钉机器人通知（Markdown 格式）
+- [x] 邮件通知器
+- [x] 通知管理器（NotificationManager）
+- [x] 批量通知支持
+
+**阶段 4：聚合降噪（10%）✅**
+- [x] 告警聚合器（AlertAggregator）
+- [x] 告警去重器（AlertDeduplicator）
+- [x] 告警分组器（AlertGrouper）
+- [x] 静默机制（防止告警风暴）
+- [x] 去重机制（避免重复告警）
+- [x] 14 个单元测试通过
+
+> **状态**：监控告警系统已 100% 完成，生产就绪！  
+> **核心特性**：
+> - ✅ 完整的 Prometheus 指标体系（18+ 指标）
+> - ✅ Grafana Dashboard 模板
+> - ✅ 实时告警规则引擎
+> - ✅ 多通知渠道（Webhook/钉钉/邮件）
+> - ✅ 告警聚合降噪（静默/去重/分组）
+> - ✅ 系统资源监控
+> - ✅ 完整的示例和文档
+
+> **代码统计**：
+> - 代码总量：~1200 行
+> - 测试覆盖：14 个单元测试
+> - 模块数量：5 个核心模块
 
 #### 3.2 日志增强
 - [ ] 结构化日志（JSON Lines）
