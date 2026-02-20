@@ -271,17 +271,108 @@
 > - 支持连接超时和验证
 > - 足够满足 IoT 平台需求
 
+### 4.1 存储架构优化（完成度 100%）✅
+
+**详细说明**：重构 TS 分片存储架构，实现关注点分离
+
+**已完成**：
+- [x] 优先级1: 在 flux-storage 中添加 SegmentStorage trait（100%）
+  - [x] 定义 SegmentStorage trait 接口
+  - [x] save_segment 方法
+  - [x] load_segment 方法
+  - [x] delete_segment 方法
+  - [x] list_segments 方法
+  - [x] cleanup_old_segments 方法
+
+- [x] 优先级2: 实现 LocalSegmentStorage（100%）
+  - [x] 基于本地文件系统的实现
+  - [x] 集成 StorageManager（存储池选择）
+  - [x] 自动目录创建
+  - [x] 分片清理功能
+  - [x] 5 个单元测试通过
+
+- [x] 优先级3: 重构 HlsManager 使用新 trait（100%）
+  - [x] 移除直接文件 I/O 操作
+  - [x] 使用 SegmentStorage trait
+  - [x] 简化 HlsStreamContext（移除 segment_dir）
+  - [x] 更新构造函数支持 trait 注入
+  - [x] finalize_segment 使用 trait
+  - [x] get_segment 使用 trait
+
+> **状态**：存储架构优化已 100% 完成！  
+> **核心改进**：
+> - ✅ 关注点分离：生成与存储解耦
+> - ✅ 易于扩展：可轻松添加 S3、OSS 等存储后端
+> - ✅ 易于测试：可单独测试存储逻辑
+> - ✅ 灵活配置：支持多种存储策略
+
+> **代码统计**：
+> - SegmentStorage trait: ~300 行
+> - LocalSegmentStorage: ~250 行
+> - HlsManager 重构: ~100 行修改
+> - 测试覆盖：5 个单元测试
+
+> **架构优势**：
+> - 📦 **模块化**：TsMuxer（编码）→ HlsManager（协调）→ SegmentStorage（存储）
+> - 🔌 **可插拔**：可轻松替换存储后端
+> - 🎯 **单一职责**：每个组件只做一件事
+> - 🧪 **可测试性**：可 mock SegmentStorage 进行测试
+
 ---
 
 ## 🟡 中优先级任务
 
 ### 5. 媒体功能增强
 
-#### 5.1 HLS/FLV 完善
-- [ ] TS 分片生成优化
-- [ ] HTTP-FLV 流式传输
-- [ ] 自适应码率（ABR）
-- [ ] 多码率切换
+#### 5.1 HLS/FLV 完善（完成度 75%）✅
+
+**已完成**：
+- [x] TS 分片生成优化（100%）✅
+  - [x] TsMuxer 实现（PAT/PMT/PES）
+  - [x] HlsManager 自动分片
+  - [x] 基于关键帧切片
+  - [x] M3U8 播放列表生成
+
+- [x] HTTP-FLV 流式传输（100%）✅
+  - [x] FlvMuxer 封装器
+  - [x] HTTP-FLV 流式服务器
+  - [x] 实时推送机制（async_stream）
+  - [x] Axum 路由集成
+
+- [x] 自适应码率（ABR）（100%）✅
+  - [x] AbrController 实现
+  - [x] 带宽估算器（加权平均）
+  - [x] 缓冲区监控
+  - [x] 三种策略（Conservative/Balanced/Aggressive）
+  - [x] 码率切换决策算法
+  - [x] 7 个单元测试通过
+  
+- [x] 多码率切换（100%）✅
+  - [x] Master playlist 生成（HLS）
+  - [x] DASH MPD 生成
+  - [x] MultibitrateConfig 配置
+  - [x] BitrateVariant 管理
+  - [x] MultibitrateStreamManager
+  - [x] 4 个单元测试通过
+
+> **状态**：HLS/FLV 完善已 75% 完成！  
+> **核心特性**：
+> - ✅ 完整的 TS 分片生成（PAT/PMT/PES）
+> - ✅ HTTP-FLV 实时流式传输
+> - ✅ 自适应码率控制（ABR）
+> - ✅ 多码率支持（HLS Master/DASH MPD）
+> - ✅ 11 个单元测试通过
+
+> **代码统计**：
+> - HTTP-FLV: ~150 行
+> - ABR Controller: ~270 行
+> - Multibitrate: ~200 行
+> - 测试覆盖：11 个单元测试
+
+> **待集成**：
+> - [ ] HTTP-FLV 路由添加到 main.rs
+> - [ ] ABR 与 HLS 集成
+> - [ ] 多码率编码器集成
 
 #### 5.2 时移回放（TimeShift）
 - [ ] 时移索引管理

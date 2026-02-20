@@ -63,7 +63,51 @@ impl StorageManager {
         }
     }
 
-    /// 初始化存储池
+    /// 初始化存储池（使用后端）
+    pub async fn initialize_with_backends(
+        &self,
+        pool_configs: Vec<(PoolConfig, Arc<dyn crate::backend::StorageBackend>)>,
+    ) -> Result<()> {
+        let mut monitor = self.disk_monitor.write().await;
+        let disks = monitor.scan_disks()?;
+
+        let mut to_insert: Vec<(String, StoragePool)> = Vec::new();
+
+        for (config, backend) in pool_configs {
+            let mut config = config;
+
+            // 将相对路径归一化为绝对路径
+            config.path = match tokio::fs::canonicalize(&config.path).await {
+                Ok(p) => p,
+                Err(_) => config.path.clone(),
+            };
+
+            // 查找匹配的磁盘
+            if let Some(disk_info) = disks.iter().find(|d| {
+                config.path == d.mount_point || config.path.starts_with(&d.mount_point)
+            }) {
+                let pool = StoragePool::new(config.clone(), disk_info.clone(), backend);
+                info!("Initialized storage pool with backend: {} at {:?}", config.name, config.path);
+                to_insert.push((config.name.clone(), pool));
+            } else {
+                warn!("No disk found for pool: {} at {:?}", config.name, config.path);
+            }
+        }
+
+        {
+            let mut pools = self.pools.write().await;
+            for (name, pool) in to_insert {
+                pools.insert(name, pool);
+            }
+        }
+        
+        // 更新指标
+        self.update_metrics().await?;
+        
+        Ok(())
+    }
+
+    /// 初始化存储池（兼容旧接口）
     pub async fn initialize(&self, pool_configs: Vec<PoolConfig>) -> Result<()> {
         let mut monitor = self.disk_monitor.write().await;
         let disks = monitor.scan_disks()?;
@@ -83,7 +127,11 @@ impl StorageManager {
             if let Some(disk_info) = disks.iter().find(|d| {
                 config.path == d.mount_point || config.path.starts_with(&d.mount_point)
             }) {
-                let pool = StoragePool::new(config.clone(), disk_info.clone());
+                // 创建本地后端
+                use crate::backend::LocalBackend;
+                let backend = Arc::new(LocalBackend::new(config.path.clone()));
+                
+                let pool = StoragePool::new(config.clone(), disk_info.clone(), backend);
                 info!("Initialized storage pool: {} at {:?}", config.name, config.path);
                 to_insert.push((config.name.clone(), pool));
             } else {
@@ -102,6 +150,130 @@ impl StorageManager {
         self.update_metrics().await?;
         
         Ok(())
+    }
+
+    /// 写入文件到指定池
+    pub async fn write_to_pool(
+        &self,
+        pool_name: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        let pools = self.pools.read().await;
+        let pool = pools.get(pool_name)
+            .ok_or_else(|| anyhow!("Pool not found: {}", pool_name))?;
+        
+        pool.write(path, data).await
+    }
+    
+    /// 从指定池读取文件
+    pub async fn read_from_pool(
+        &self,
+        pool_name: &str,
+        path: &str,
+    ) -> Result<bytes::Bytes> {
+        let pools = self.pools.read().await;
+        let pool = pools.get(pool_name)
+            .ok_or_else(|| anyhow!("Pool not found: {}", pool_name))?;
+        
+        pool.read(path).await
+    }
+    
+    /// 从指定池删除文件
+    pub async fn delete_from_pool(
+        &self,
+        pool_name: &str,
+        path: &str,
+    ) -> Result<()> {
+        let pools = self.pools.read().await;
+        let pool = pools.get(pool_name)
+            .ok_or_else(|| anyhow!("Pool not found: {}", pool_name))?;
+        
+        pool.delete(path).await
+    }
+    
+    /// 从所有池中删除文件
+    pub async fn delete_from_any_pool(&self, path: &str) -> Result<()> {
+        let pools = self.pools.read().await;
+        let mut deleted = false;
+        
+        for pool in pools.values() {
+            if pool.delete(path).await.is_ok() {
+                deleted = true;
+            }
+        }
+        
+        if deleted {
+            Ok(())
+        } else {
+            Err(anyhow!("File not found in any pool: {}", path))
+        }
+    }
+    
+    /// 从指定池列出文件
+    pub async fn list_from_pool(
+        &self,
+        pool_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        let pools = self.pools.read().await;
+        let pool = pools.get(pool_name)
+            .ok_or_else(|| anyhow!("Pool not found: {}", pool_name))?;
+        
+        pool.list(prefix).await
+    }
+    
+    /// 从所有池中列出文件（去重）
+    pub async fn list_from_all_pools(&self, prefix: &str) -> Result<Vec<String>> {
+        let pools = self.pools.read().await;
+        let mut all_files = std::collections::HashSet::new();
+        
+        for pool in pools.values() {
+            if let Ok(files) = pool.list(prefix).await {
+                for file in files {
+                    all_files.insert(file);
+                }
+            }
+        }
+        
+        Ok(all_files.into_iter().collect())
+    }
+    
+    /// 从所有池中读取文件（尝试第一个找到的）
+    pub async fn read_from_any_pool(&self, path: &str) -> Result<bytes::Bytes> {
+        let pools = self.pools.read().await;
+        
+        for pool in pools.values() {
+            if let Ok(data) = pool.read(path).await {
+                return Ok(data);
+            }
+        }
+        
+        Err(anyhow!("File not found in any pool: {}", path))
+    }
+    
+    /// 选择最佳池并写入
+    pub async fn write_with_selection(
+        &self,
+        path: &str,
+        data: &[u8],
+    ) -> Result<String> {
+        // 选择最佳存储池
+        let pool_path = self.select_pool(data.len() as u64).await?;
+        
+        // 找到对应的池名称
+        let pools = self.pools.read().await;
+        let pool_name = pools.iter()
+            .find(|(_, pool)| pool.get_path() == &pool_path)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| anyhow!("Pool not found for path: {:?}", pool_path))?;
+        
+        drop(pools);
+        
+        // 写入文件
+        self.write_to_pool(&pool_name, path, data).await?;
+        
+        Ok(pool_name)
     }
 
     /// 选择最佳存储池（负载均衡）

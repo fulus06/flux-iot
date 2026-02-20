@@ -1,3 +1,4 @@
+pub mod abr;
 pub mod error;
 pub mod playback;
 pub mod protocol;
