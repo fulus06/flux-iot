@@ -9,17 +9,341 @@ use axum::{
     Json, Router,
 };
 use config::{Config, File, FileFormat};
+use chrono::Utc;
+use flux_core::entity::events;
 use flux_types::message::Message;
 use serde::Deserialize;
 use serde_json::Value;
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value as SeaValue};
+use serde::Serialize;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    Statement, TransactionTrait, Value as SeaValue,
+};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use tokio::sync::RwLock;
 
 #[derive(Deserialize)]
 pub struct EventRequest {
     pub topic: String,
     pub payload: Value,
+}
+
+#[derive(Deserialize)]
+pub struct StorageTelemetryTroubleshootQuery {
+    pub topic_prefix: Option<String>,
+    pub window_secs: Option<u64>,
+    pub top: Option<usize>,
+    pub samples: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StorageTelemetryErrorSample {
+    pub timestamp: i64,
+    pub topic: String,
+    pub service: String,
+    pub stream_id: Option<String>,
+    pub error: Option<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StorageTelemetryTroubleshootResponse {
+    pub stats: StorageTelemetryStatsResponse,
+    pub error_samples: Vec<StorageTelemetryErrorSample>,
+}
+
+pub async fn get_storage_telemetry_troubleshoot(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<StorageTelemetryTroubleshootQuery>,
+) -> impl IntoResponse {
+    let prefix = q.topic_prefix.clone().unwrap_or_else(|| "storage/".to_string());
+    let window_secs = q.window_secs.unwrap_or(300);
+    let top = q.top.unwrap_or(20).min(200);
+    let samples = q.samples.unwrap_or(10).min(200);
+
+    // 1) Recent write_err samples
+    let now_ms = Utc::now().timestamp_millis();
+    let since_ms = now_ms.saturating_sub(window_secs as i64 * 1000);
+
+    let rows = match events::Entity::find()
+        .filter(events::Column::Topic.eq("storage/write_err"))
+        .filter(events::Column::Timestamp.gte(since_ms))
+        .order_by_desc(events::Column::Timestamp)
+        .limit(samples)
+        .all(&state.db)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut error_samples = Vec::new();
+    for r in rows {
+        let service = r
+            .payload
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let stream_id = r
+            .payload
+            .get("stream_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let error = r
+            .payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        error_samples.push(StorageTelemetryErrorSample {
+            timestamp: r.timestamp,
+            topic: r.topic,
+            service,
+            stream_id,
+            error,
+            payload: r.payload,
+        });
+    }
+
+    // 2) Compute stats inline with top slicing
+    let rows_for_stats = match events::Entity::find()
+        .filter(events::Column::Topic.like(format!("{}%", prefix)))
+        .filter(events::Column::Timestamp.gte(since_ms))
+        .filter(events::Column::Timestamp.lte(now_ms))
+        .order_by_desc(events::Column::Timestamp)
+        .limit(20000)
+        .all(&state.db)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut counts: std::collections::HashMap<(String, String), u64> =
+        std::collections::HashMap::new();
+    for r in &rows_for_stats {
+        let service = r
+            .payload
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let key = (r.topic.clone(), service);
+        let entry = counts.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    let mut items = counts
+        .into_iter()
+        .map(|((topic, service), count)| StorageTelemetryStatsItem { topic, service, count })
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| b.count.cmp(&a.count));
+
+    let mut stats_full = StorageTelemetryStatsResponse {
+        topic_prefix: prefix.clone(),
+        since: Some(since_ms),
+        until: Some(now_ms),
+        rows_scanned: rows_for_stats.len() as u64,
+        items,
+    };
+
+    stats_full.items.truncate(top);
+
+    (
+        StatusCode::OK,
+        Json(StorageTelemetryTroubleshootResponse {
+            stats: stats_full,
+            error_samples,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct StorageTelemetryStatsQuery {
+    pub topic_prefix: Option<String>,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub max_rows: Option<u64>,
+    pub window_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StatsCacheKey {
+    topic_prefix: String,
+    max_rows: u64,
+    window_secs: u64,
+    bucket: i64,
+}
+
+struct StatsCacheEntry {
+    expires_at_ms: i64,
+    resp: StorageTelemetryStatsResponse,
+}
+
+fn stats_cache() -> &'static RwLock<HashMap<StatsCacheKey, StatsCacheEntry>> {
+    static CACHE: OnceLock<RwLock<HashMap<StatsCacheKey, StatsCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct StorageTelemetryStatsItem {
+    pub topic: String,
+    pub service: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct StorageTelemetryStatsResponse {
+    pub topic_prefix: String,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub rows_scanned: u64,
+    pub items: Vec<StorageTelemetryStatsItem>,
+}
+
+pub async fn get_storage_telemetry_stats(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<StorageTelemetryStatsQuery>,
+) -> impl IntoResponse {
+    let prefix = q.topic_prefix.unwrap_or_else(|| "storage/".to_string());
+    let max_rows = q.max_rows.unwrap_or(2000).min(20000);
+
+    let now_ms = Utc::now().timestamp_millis();
+    let (since, until, window_secs) = if let Some(window_secs) = q.window_secs {
+        if window_secs == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "window_secs must be > 0" })),
+            )
+                .into_response();
+        }
+
+        let window_ms = match (window_secs as i64).checked_mul(1000) {
+            Some(v) => v,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "window_secs too large" })),
+                )
+                    .into_response();
+            }
+        };
+
+        let since = now_ms.saturating_sub(window_ms);
+        (Some(since), Some(now_ms), Some(window_secs))
+    } else {
+        (q.since, q.until, None)
+    };
+
+    // Cache only applies to window-based queries.
+    if let Some(window_secs) = window_secs {
+        let bucket = (now_ms / 1000) / window_secs as i64;
+        let key = StatsCacheKey {
+            topic_prefix: prefix.clone(),
+            max_rows,
+            window_secs,
+            bucket,
+        };
+
+        let guard = stats_cache().read().await;
+        if let Some(hit) = guard.get(&key) {
+            if hit.expires_at_ms > now_ms {
+                return (StatusCode::OK, Json(hit.resp.clone())).into_response();
+            }
+        }
+    }
+
+    let mut stmt = events::Entity::find()
+        .filter(events::Column::Topic.like(format!("{}%", prefix)))
+        .order_by_desc(events::Column::Timestamp)
+        .limit(max_rows);
+
+    if let Some(since) = since {
+        stmt = stmt.filter(events::Column::Timestamp.gte(since));
+    }
+    if let Some(until) = until {
+        stmt = stmt.filter(events::Column::Timestamp.lte(until));
+    }
+
+    let rows = match stmt.all(&state.db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut counts: std::collections::HashMap<(String, String), u64> =
+        std::collections::HashMap::new();
+
+    for r in &rows {
+        let service = r
+            .payload
+            .get("service")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let key = (r.topic.clone(), service);
+        let entry = counts.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    let mut items = counts
+        .into_iter()
+        .map(|((topic, service), count)| StorageTelemetryStatsItem { topic, service, count })
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| b.count.cmp(&a.count));
+
+    let resp = StorageTelemetryStatsResponse {
+        topic_prefix: prefix.clone(),
+        since,
+        until,
+        rows_scanned: rows.len() as u64,
+        items,
+    };
+
+    // Insert cache for window-based queries.
+    if let Some(window_secs) = window_secs {
+        let bucket = (now_ms / 1000) / window_secs as i64;
+        let key = StatsCacheKey {
+            topic_prefix: prefix,
+            max_rows,
+            window_secs,
+            bucket,
+        };
+
+        let mut guard = stats_cache().write().await;
+        guard.insert(
+            key,
+            StatsCacheEntry {
+                expires_at_ms: now_ms.saturating_add(2000),
+                resp: resp.clone(),
+            },
+        );
+    }
+
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 pub async fn gb_snapshot(
@@ -1317,9 +1641,109 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 }
 
+pub async fn get_storage_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let metrics = state.storage_manager.get_metrics().await;
+    (StatusCode::OK, Json(metrics))
+}
+
+pub async fn get_storage_pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let pools = state.storage_manager.get_pools_stats().await;
+    (StatusCode::OK, Json(pools))
+}
+
+#[derive(Deserialize)]
+pub struct StorageTelemetryRequest {
+    pub topic: String,
+    pub payload: Value,
+}
+
+pub async fn post_storage_telemetry(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<StorageTelemetryRequest>,
+) -> impl IntoResponse {
+    metrics::record_http_request();
+    let start = std::time::Instant::now();
+
+    let service = req
+        .payload
+        .get("service")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    metrics::record_storage_telemetry(&req.topic, service.as_deref());
+
+    let msg = Message::new(req.topic, req.payload);
+    let msg_id = msg.id.to_string();
+
+    if let Err(e) = state.event_bus.publish(msg) {
+        tracing::warn!(
+            "Telemetry published but no subscribers: {} (Error: {})",
+            msg_id,
+            e
+        );
+    } else {
+        metrics::record_event_published();
+    }
+
+    metrics::record_http_duration(start.elapsed().as_secs_f64());
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok", "id": msg_id })),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct StorageAuditQuery {
+    pub topic_prefix: Option<String>,
+    pub since: Option<i64>,
+    pub limit: Option<u64>,
+}
+
+pub async fn get_storage_audit(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<StorageAuditQuery>,
+) -> impl IntoResponse {
+    let prefix = q.topic_prefix.unwrap_or_else(|| "storage/".to_string());
+    let limit = q.limit.unwrap_or(200).min(1000);
+
+    let mut stmt = events::Entity::find()
+        .filter(events::Column::Topic.like(format!("{}%", prefix)))
+        .order_by_desc(events::Column::Timestamp)
+        .limit(limit);
+
+    if let Some(since) = q.since {
+        stmt = stmt.filter(events::Column::Timestamp.gte(since));
+    }
+
+    match stmt.all(&state.db).await {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
+        .route("/api/v1/storage/metrics", get(get_storage_metrics))
+        .route("/api/v1/storage/pools", get(get_storage_pools))
+        .route("/api/v1/storage/telemetry", post(post_storage_telemetry))
+        .route("/api/v1/storage/audit", get(get_storage_audit))
+        .route(
+            "/api/v1/storage/telemetry/stats",
+            get(get_storage_telemetry_stats),
+        )
+        .route(
+            "/api/v1/storage/telemetry/troubleshoot",
+            get(get_storage_telemetry_troubleshoot),
+        )
         .route("/api/v1/event", post(accept_event))
         .route("/api/v1/rules", post(create_rule).get(list_rules))
         .route("/api/v1/rules/reload", post(reload_rules))
@@ -1387,13 +1811,15 @@ mod tests {
         let config_db = Database::connect("sqlite::memory:")
             .await
             .expect("config db");
-
         let (_tx, rx) = watch::channel(flux_server::AppConfig::default());
+
+        let storage_manager = Arc::new(flux_storage::StorageManager::new());
 
         Arc::new(AppState {
             event_bus,
             plugin_manager,
             script_engine,
+            storage_manager,
             db,
             config_db: Some(config_db),
             config: rx,
@@ -1410,12 +1836,15 @@ mod tests {
 
         let (_tx, rx) = watch::channel(flux_server::AppConfig::default());
 
+        let storage_manager = Arc::new(flux_storage::StorageManager::new());
+
         let backend: Gb28181BackendRef = Arc::new(RemoteBackend::new(base_url));
 
         Arc::new(AppState {
             event_bus,
             plugin_manager,
             script_engine,
+            storage_manager,
             db,
             config_db: None,
             config: rx,

@@ -20,9 +20,13 @@ use flux_media_core::{
     storage::{filesystem::FileSystemStorage, MediaStorage, StorageConfig},
     types::StreamId,
 };
+use flux_storage::{DiskType, PoolConfig, StorageManager};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
+
+mod telemetry;
+use telemetry::TelemetryClient;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -44,6 +48,12 @@ struct Args {
 
     #[arg(long, default_value_t = 2)]
     keyframe_interval_secs: u64,
+
+    #[arg(long)]
+    telemetry_endpoint: Option<String>,
+
+    #[arg(long, default_value_t = 1000)]
+    telemetry_timeout_ms: u64,
 }
 
 #[derive(Clone)]
@@ -53,6 +63,7 @@ struct AppState {
     storage: Arc<RwLock<FileSystemStorage>>,
     orchestrator: Arc<SnapshotOrchestrator>,
     streams: Arc<RwLock<HashMap<String, Arc<GbStreamProcessor>>>>,
+    telemetry: TelemetryClient,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +103,7 @@ struct GbStreamProcessor {
     rtp_receiver: Arc<RtpReceiver>,
     storage: Arc<RwLock<FileSystemStorage>>,
     orchestrator: Arc<SnapshotOrchestrator>,
+    telemetry: TelemetryClient,
     running: Arc<RwLock<bool>>,
 }
 
@@ -106,6 +118,7 @@ impl GbStreamProcessor {
         rtp_receiver: Arc<RtpReceiver>,
         storage: Arc<RwLock<FileSystemStorage>>,
         orchestrator: Arc<SnapshotOrchestrator>,
+        telemetry: TelemetryClient,
     ) -> Self {
         Self {
             stream_id,
@@ -117,6 +130,7 @@ impl GbStreamProcessor {
             rtp_receiver,
             storage,
             orchestrator,
+            telemetry,
             running: Arc::new(RwLock::new(false)),
         }
     }
@@ -180,11 +194,40 @@ impl GbStreamProcessor {
 
     async fn save_frame(&self, data: &[u8]) -> VideoResult<()> {
         let timestamp = chrono::Utc::now();
+        let size = data.len();
         let bytes = Bytes::copy_from_slice(data);
         let stream_id = StreamId::from_string(self.stream_id.clone());
         let mut storage = self.storage.write().await;
-        storage.put_object(&stream_id, timestamp, bytes).await
-            .map_err(|e| VideoError::Other(e.to_string()))?;
+        if let Err(e) = storage.put_object(&stream_id, timestamp, bytes).await {
+            if self.telemetry.enabled() {
+                self.telemetry
+                    .post(
+                        "storage/write_err",
+                        serde_json::json!({
+                            "service": "flux-gb28181d",
+                            "stream_id": stream_id.as_str(),
+                            "error": e.to_string(),
+                        }),
+                    )
+                    .await;
+            }
+
+            return Err(VideoError::Other(e.to_string()));
+        }
+
+        if self.telemetry.enabled() {
+            self.telemetry
+                .post_sampled(
+                    "storage/write_ok",
+                    serde_json::json!({
+                        "service": "flux-gb28181d",
+                        "stream_id": stream_id.as_str(),
+                        "bytes": size,
+                    }),
+                    200,
+                )
+                .await;
+        }
         Ok(())
     }
 
@@ -221,8 +264,57 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    // 加载配置（用于存储池多池配置）
+    let config_loader = flux_config::ConfigLoader::new("./config");
+
+    // 初始化统一存储池（flux-storage）
+    let storage_manager = Arc::new(StorageManager::new());
+    let pool_configs = match config_loader.load_storage_pools("gb28181") {
+        Ok(Some(pools)) => pools,
+        Ok(None) => vec![PoolConfig {
+            name: "default".to_string(),
+            path: PathBuf::from(&args.storage_dir),
+            disk_type: DiskType::Unknown,
+            priority: 1,
+            max_usage_percent: 95.0,
+        }],
+        Err(e) => {
+            tracing::warn!(target: "gb28181d", "Failed to load storage pools config, fallback to CLI storage_dir: {}", e);
+            vec![PoolConfig {
+                name: "default".to_string(),
+                path: PathBuf::from(&args.storage_dir),
+                disk_type: DiskType::Unknown,
+                priority: 1,
+                max_usage_percent: 95.0,
+            }]
+        }
+    };
+    if let Err(e) = storage_manager.initialize(pool_configs).await {
+        tracing::warn!(target: "gb28181d", "StorageManager initialize failed, fallback to local dir: {}", e);
+    }
+    let selected_root = storage_manager
+        .select_pool(0)
+        .await
+        .unwrap_or_else(|_| PathBuf::from(&args.storage_dir))
+        .join("gb28181");
+
+    let telemetry = TelemetryClient::new(args.telemetry_endpoint.clone(), args.telemetry_timeout_ms);
+    if telemetry.enabled() {
+        telemetry
+            .post(
+                "storage/service_start",
+                serde_json::json!({
+                    "service": "flux-gb28181d",
+                    "selected_root": selected_root.to_string_lossy().to_string(),
+                    "storage_dir": args.storage_dir,
+                    "keyframe_dir": args.keyframe_dir,
+                }),
+            )
+            .await;
+    }
+
     let storage_config = StorageConfig {
-        root_dir: PathBuf::from(&args.storage_dir),
+        root_dir: selected_root,
         retention_days: 7,
         segment_duration_secs: 60,
     };
@@ -262,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
         storage,
         orchestrator,
         streams: Arc::new(RwLock::new(HashMap::new())),
+        telemetry,
     };
 
     let app = Router::new()
@@ -328,6 +421,7 @@ async fn invite(
         state.rtp_receiver.clone(),
         state.storage.clone(),
         state.orchestrator.clone(),
+        state.telemetry.clone(),
     ));
 
     processor

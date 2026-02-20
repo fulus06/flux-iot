@@ -1,0 +1,66 @@
+# 存储监控服务配置
+
+# 监控间隔（秒）
+check_interval_secs = 60
+
+# 告警去重间隔（分钟）
+alert_dedup_minutes = 5
+
+# 是否发送恢复通知（从告警状态恢复为 Healthy）
+send_recovery_alerts = true
+
+# 是否仅在状态变化时发送告警
+alert_on_status_change = true
+
+# 是否启用生命周期 GC
+enable_lifecycle_gc = false
+
+# 按时间保留策略（天）
+retention_days = 7
+
+# 最大容量（GB），超过后将触发清理（可选）
+# max_capacity_gb = 500
+
+# 使用率触发阈值（百分比）
+gc_trigger_usage_percent = 90.0
+
+# 清理到目标使用率（百分比）
+gc_target_usage_percent = 80.0
+
+# 是否发送 GC 执行结果通知
+notify_gc_results = false
+
+# 是否启用上报到 flux-server 的 telemetry（审计用）
+telemetry_enabled = false
+
+# 上报 endpoint（flux-server）：POST /api/v1/storage/telemetry
+# telemetry_endpoint = "http://127.0.0.1:3000/api/v1/storage/telemetry"
+
+# 上报超时（毫秒）
+telemetry_timeout_ms = 1000
+
+# 存储池配置
+[[storage_pools]]
+name = "ssd-realtime"
+path = "/mnt/ssd/recordings"
+disk_type = "ssd"
+priority = 1
+max_usage_percent = 90.0
+
+[[storage_pools]]
+name = "hdd-archive"
+path = "/mnt/hdd/recordings"
+disk_type = "hdd"
+priority = 2
+max_usage_percent = 95.0
+
+# 通知配置（通过环境变量设置）
+# SMTP_HOST=smtp.example.com
+# SMTP_PORT=587
+# SMTP_USER=noreply@flux-iot.com
+# SMTP_PASS=your-password
+# SMTP_FROM=noreply@flux-iot.com
+# SMTP_TO=admin@example.com
+#
+# DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
+# DINGTALK_SECRET=xxx

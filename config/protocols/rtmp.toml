@@ -9,6 +9,13 @@ playlist_length = 5
 [storage]
 storage_dir = "./data/hls"
 
+[[storage.pools]]
+name = "rtmp-ssd"
+path = "./data-fast"
+disk_type = "SSD"
+priority = 1
+max_usage_percent = 90.0
+
 [timeshift]
 # RTMP 特定的时移配置（覆盖全局配置）
 enabled = true

@@ -1,8 +1,25 @@
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use std::net::SocketAddr;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tracing::{debug, info};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+/// 传输模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportMode {
+    Udp,        // UDP 单播
+    Tcp,        // TCP 单播
+    Multicast,  // UDP 多播
+}
+
+/// Interleaved 数据包
+#[derive(Debug, Clone)]
+pub struct InterleavedPacket {
+    pub channel: u8,
+    pub data: Bytes,
+}
 
 /// RTSP 客户端
 pub struct RtspClient {
@@ -10,6 +27,7 @@ pub struct RtspClient {
     url: String,
     session_id: Option<String>,
     cseq: u32,
+    transport_mode: TransportMode,
 }
 
 /// RTSP 响应
@@ -28,7 +46,13 @@ impl RtspClient {
             url,
             session_id: None,
             cseq: 1,
+            transport_mode: TransportMode::Udp,
         }
+    }
+
+    /// 设置传输模式
+    pub fn set_transport_mode(&mut self, mode: TransportMode) {
+        self.transport_mode = mode;
     }
 
     /// 连接到 RTSP 服务器
@@ -67,9 +91,25 @@ impl RtspClient {
 
     /// 发送 SETUP 请求
     pub async fn setup(&mut self, track_url: &str, client_port: u16) -> Result<RtspResponse> {
+        let transport = match self.transport_mode {
+            TransportMode::Udp => {
+                format!("RTP/AVP;unicast;client_port={}-{}", client_port, client_port + 1)
+            }
+            TransportMode::Tcp => {
+                // TCP Interleaved 模式
+                // channel 0: RTP, channel 1: RTCP
+                format!("RTP/AVP/TCP;unicast;interleaved=0-1")
+            }
+            TransportMode::Multicast => {
+                // 多播模式
+                // 服务器会在响应中返回多播地址和端口
+                format!("RTP/AVP;multicast")
+            }
+        };
+        
         let request = format!(
-            "SETUP {} RTSP/1.0\r\nCSeq: {}\r\nTransport: RTP/AVP;unicast;client_port={}-{}\r\n\r\n",
-            track_url, self.cseq, client_port, client_port + 1
+            "SETUP {} RTSP/1.0\r\nCSeq: {}\r\nTransport: {}\r\n\r\n",
+            track_url, self.cseq, transport
         );
         self.cseq += 1;
         
@@ -79,6 +119,14 @@ impl RtspClient {
         if let Some(session) = response.get_header("Session") {
             self.session_id = Some(session.split(';').next().unwrap_or(&session).to_string());
             info!(target: "rtsp_client", "Session ID: {}", session);
+        }
+        
+        // 多播模式下，从 Transport 响应头中提取多播地址和端口
+        if self.transport_mode == TransportMode::Multicast {
+            if let Some(transport_header) = response.get_header("Transport") {
+                info!(target: "rtsp_client", "Multicast Transport: {}", transport_header);
+                // 解析示例: Transport: RTP/AVP;multicast;destination=224.0.0.1;port=5000-5001
+            }
         }
         
         Ok(response)
@@ -193,6 +241,69 @@ impl RtspClient {
         debug!(target: "rtsp_client", "Received response: {} {}", response.status_code, response.status_text);
         
         Ok(response)
+    }
+
+    /// 启动 Interleaved 数据接收（TCP 模式）
+    pub async fn start_interleaved_receiver(
+        mut self,
+    ) -> Result<(mpsc::Receiver<InterleavedPacket>, mpsc::Receiver<RtspResponse>)> {
+        let (data_tx, data_rx) = mpsc::channel(100);
+        let (response_tx, response_rx) = mpsc::channel(10);
+        
+        tokio::spawn(async move {
+            if let Err(e) = self.receive_interleaved_loop(data_tx, response_tx).await {
+                warn!(target: "rtsp_client", "Interleaved receiver error: {}", e);
+            }
+        });
+        
+        Ok((data_rx, response_rx))
+    }
+
+    /// Interleaved 接收循环
+    async fn receive_interleaved_loop(
+        &mut self,
+        data_tx: mpsc::Sender<InterleavedPacket>,
+        _response_tx: mpsc::Sender<RtspResponse>,
+    ) -> Result<()> {
+        let stream = self.stream.as_mut()
+            .ok_or_else(|| anyhow!("Not connected"))?;
+        
+        let mut buffer = vec![0u8; 65536];
+        
+        loop {
+            // 读取第一个字节，判断是 RTSP 响应还是 Interleaved 数据
+            let first_byte = match stream.read_u8().await {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            
+            if first_byte == b'$' {
+                // Interleaved 数据包
+                // Format: $ + channel(1) + length(2) + data
+                let channel = stream.read_u8().await?;
+                let length = stream.read_u16().await? as usize;
+                
+                if length > buffer.len() {
+                    warn!(target: "rtsp_client", "Interleaved packet too large: {}", length);
+                    continue;
+                }
+                
+                stream.read_exact(&mut buffer[..length]).await?;
+                let data = Bytes::copy_from_slice(&buffer[..length]);
+                
+                let packet = InterleavedPacket { channel, data };
+                
+                if data_tx.send(packet).await.is_err() {
+                    break;
+                }
+            } else {
+                // RTSP 响应（暂时忽略，因为已经在 send_request 中处理）
+                // 这里可以扩展处理异步 RTSP 响应
+                debug!(target: "rtsp_client", "Received RTSP response byte: {}", first_byte);
+            }
+        }
+        
+        Ok(())
     }
 
     /// 解析 URL

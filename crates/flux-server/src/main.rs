@@ -15,6 +15,8 @@ use flux_server::config_provider::{AppConfigProvider, DbConfigProvider, FileConf
 use flux_server::config_manager::ConfigManager;
 use flux_server::config::Gb28181Backend;
 use flux_server::gb28181_backend::{EmbeddedBackend, Gb28181BackendRef, RemoteBackend};
+use flux_storage::{DiskType, PoolConfig, StorageManager};
+use std::path::PathBuf;
 
 mod api;
 mod auth;
@@ -110,6 +112,34 @@ async fn main() -> anyhow::Result<()> {
     let event_bus = Arc::new(EventBus::new(app_config.eventbus.capacity));
     let plugin_manager = Arc::new(PluginManager::new()?);
     let script_engine = Arc::new(ScriptEngine::new());
+
+    // 2.1 Initialize StorageManager (multi-pool from ./config)
+    let storage_manager = Arc::new(StorageManager::new());
+    let storage_cfg_loader = flux_config::ConfigLoader::new("./config");
+    let pool_configs = match storage_cfg_loader.load_storage_pools("server") {
+        Ok(Some(pools)) => pools,
+        Ok(None) => vec![PoolConfig {
+            name: "default".to_string(),
+            path: PathBuf::from("./data"),
+            disk_type: DiskType::Unknown,
+            priority: 1,
+            max_usage_percent: 95.0,
+        }],
+        Err(e) => {
+            tracing::warn!(target: "flux_server", "Failed to load storage pools config, fallback to ./data: {}", e);
+            vec![PoolConfig {
+                name: "default".to_string(),
+                path: PathBuf::from("./data"),
+                disk_type: DiskType::Unknown,
+                priority: 1,
+                max_usage_percent: 95.0,
+            }]
+        }
+    };
+    if let Err(e) = storage_manager.initialize(pool_configs).await {
+        tracing::warn!(target: "flux_server", "StorageManager initialize failed: {}", e);
+    }
+    let storage_health_handle = storage_manager.clone().start_health_check_task_handle();
 
     // Create Tables (Simple Migration for MVP)
     use sea_orm::{ConnectionTrait, Schema};
@@ -232,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
         event_bus: event_bus.clone(),
         plugin_manager: plugin_manager.clone(),
         script_engine: script_engine.clone(),
+        storage_manager: storage_manager.clone(),
         db: db.clone(),
         config_db,
         config: config_rx,
@@ -293,6 +324,12 @@ async fn main() -> anyhow::Result<()> {
         storage::start_storage_worker(storage_state).await;
     });
 
+    // 6.1 Start Storage Metrics Worker
+    let storage_metrics_state = state.clone();
+    let storage_metrics_handle = tokio::spawn(async move {
+        storage::start_storage_metrics_worker(storage_metrics_state).await;
+    });
+
     // 7. Start MQTT Broker (Ntex)
     let mqtt_bus = state.event_bus.clone();
     let authenticator = Arc::new(auth::DbAuthenticator::new(state.db.clone()));
@@ -305,6 +342,9 @@ async fn main() -> anyhow::Result<()> {
         .serve(app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    storage_health_handle.shutdown().await;
+    storage_metrics_handle.abort();
 
     Ok(())
 }

@@ -1,0 +1,46 @@
+# 录像系统全局配置
+
+[recording]
+enabled = true
+retention_days = 7              # 保留 7 天
+
+# 分片配置
+[recording.segment]
+strategy = "adaptive"           # 自适应分片（推荐）
+min_duration = 60               # 最小 1 分钟
+max_duration = 300              # 最大 5 分钟
+target_size_mb = 75             # 目标文件大小 75 MB
+
+# 压缩配置
+[recording.compression]
+realtime = "lz4"                # 实时：LZ4（快速）
+archive = "zstd"                # 归档：Zstd（平衡）
+longterm = "brotli"             # 长期：Brotli（高压缩率）
+apply_archive_after_hours = 24  # 24小时后应用归档压缩
+apply_longterm_after_days = 7   # 7天后应用长期压缩
+
+# 质量配置
+[recording.quality]
+realtime = "high"               # 实时：高质量 (1080p)
+archive = "medium"              # 归档：中等质量 (720p)
+downgrade_after_hours = 24      # 24小时后降级
+
+# 转换配置
+[recording.conversion]
+enabled = true                  # 启用自动转换
+trigger_after_hours = 24        # 24小时后触发转换
+target_quality = "medium"       # 转换目标质量 (720p)
+merge_files = true              # 合并小文件
+merge_duration = 600            # 合并成 10 分钟
+concurrency = 4                 # 并发转换数
+
+# 索引配置
+[recording.index]
+engine = "sqlite"               # 使用 SQLite（推荐）
+db_path = "./data/recordings.db"
+
+# 存储配置
+[recording.storage]
+realtime_path = "/mnt/ssd/recordings/realtime"    # 实时录像（SSD）
+archive_path = "/mnt/hdd/recordings/archive"      # 归档录像（HDD）
+longterm_path = "/mnt/hdd/recordings/longterm"    # 长期归档（HDD）

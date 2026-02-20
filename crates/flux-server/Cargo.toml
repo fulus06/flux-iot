@@ -28,6 +28,9 @@ flux-types = { version = "0.1.0", path = "../flux-types" }
 flux-mqtt = { path = "../flux-mqtt" }
 flux-video = { path = "../flux-video" }
 
+flux-storage = { path = "../flux-storage" }
+flux-config = { path = "../flux-config" }
+
 # Metrics and observability
 metrics = "0.21"
 metrics-exporter-prometheus = "0.13"

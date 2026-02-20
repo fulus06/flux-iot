@@ -1,6 +1,8 @@
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
+use flux_storage::{HealthStatus, StorageMetrics};
+use flux_storage::manager::PoolStats;
 
 /// 初始化 Prometheus metrics exporter
 pub fn init_metrics(addr: SocketAddr) -> anyhow::Result<()> {
@@ -79,6 +81,71 @@ fn describe_metrics() {
     describe_gauge!(
         "flux_database_connections",
         "Number of database connections"
+    );
+
+    // 存储相关指标
+    describe_gauge!("flux_storage_total_space_bytes", "Total storage space in bytes");
+    describe_gauge!("flux_storage_used_space_bytes", "Used storage space in bytes");
+    describe_gauge!("flux_storage_available_space_bytes", "Available storage space in bytes");
+    describe_gauge!("flux_storage_usage_percent", "Storage usage percent");
+
+    describe_counter!(
+        "flux_storage_telemetry_total",
+        "Total number of storage telemetry events ingested (labeled by topic/service)"
+    );
+
+    describe_gauge!(
+        "flux_storage_pool_total_space_bytes",
+        "Per-pool total space in bytes"
+    );
+    describe_gauge!(
+        "flux_storage_pool_available_space_bytes",
+        "Per-pool available space in bytes"
+    );
+    describe_gauge!(
+        "flux_storage_pool_usage_percent",
+        "Per-pool usage percent"
+    );
+    describe_gauge!(
+        "flux_storage_pool_health_status",
+        "Per-pool health status (0 healthy, 1 warning, 2 critical, 3 failed)"
+    );
+}
+
+pub fn set_storage_metrics(m: &StorageMetrics) {
+    gauge!("flux_storage_total_space_bytes", m.total_space as f64);
+    gauge!("flux_storage_used_space_bytes", m.used_space as f64);
+    gauge!("flux_storage_available_space_bytes", m.available_space as f64);
+    gauge!("flux_storage_usage_percent", m.usage_percent);
+}
+
+pub fn set_storage_pool_stats(p: &PoolStats) {
+    let status_val = match p.status {
+        HealthStatus::Healthy => 0.0,
+        HealthStatus::Warning => 1.0,
+        HealthStatus::Critical => 2.0,
+        HealthStatus::Failed => 3.0,
+    };
+
+    gauge!(
+        "flux_storage_pool_total_space_bytes",
+        p.total_space as f64,
+        "pool" => p.name.clone()
+    );
+    gauge!(
+        "flux_storage_pool_available_space_bytes",
+        p.available_space as f64,
+        "pool" => p.name.clone()
+    );
+    gauge!(
+        "flux_storage_pool_usage_percent",
+        p.usage_percent,
+        "pool" => p.name.clone()
+    );
+    gauge!(
+        "flux_storage_pool_health_status",
+        status_val,
+        "pool" => p.name.clone()
     );
 }
 
@@ -159,6 +226,16 @@ pub fn record_http_request() {
 /// 记录 HTTP 请求时长
 pub fn record_http_duration(duration_secs: f64) {
     histogram!("flux_http_request_duration_seconds", duration_secs);
+}
+
+pub fn record_storage_telemetry(topic: &str, service: Option<&str>) {
+    let service = service.unwrap_or("unknown");
+    counter!(
+        "flux_storage_telemetry_total",
+        1,
+        "topic" => topic.to_string(),
+        "service" => service.to_string()
+    );
 }
 
 /// 设置 EventBus 容量

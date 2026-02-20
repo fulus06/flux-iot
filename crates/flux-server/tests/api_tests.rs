@@ -5,7 +5,8 @@ use axum::{
 use flux_core::bus::EventBus;
 use flux_plugin::manager::PluginManager;
 use flux_script::ScriptEngine;
-use flux_server::{config::AppConfig, AppState};
+use flux_server::{api::create_router, config::AppConfig, AppState};
+use flux_storage::StorageManager;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Schema};
 use serde_json::json;
 use std::sync::Arc;
@@ -18,6 +19,94 @@ async fn create_test_db() -> DatabaseConnection {
         .expect("Failed to create test database")
 }
 
+#[tokio::test]
+async fn test_storage_telemetry_troubleshoot() {
+    let state = create_test_state().await;
+    let mut rx = state.event_bus.subscribe();
+    let app = flux_server::api::create_router(state);
+
+    let telemetry = json!({
+        "topic": "storage/write_err",
+        "payload": {
+            "service": "flux-rtmpd",
+            "stream_id": "rtmp/live/test",
+            "error": "disk full"
+        }
+    });
+
+    let request = Request::builder()
+        .uri("/api/v1/storage/telemetry")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&telemetry).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
+        .await
+        .expect("Timeout")
+        .expect("Failed to receive");
+
+    let request = Request::builder()
+        .uri("/api/v1/storage/telemetry/troubleshoot?window_secs=300&top=10&samples=5")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["stats"].is_object());
+    assert!(json["stats"]["items"].is_array());
+    assert!(json["error_samples"].is_array());
+}
+
+#[tokio::test]
+async fn test_storage_telemetry_stats() {
+    let state = create_test_state().await;
+    let mut rx = state.event_bus.subscribe();
+    let app = flux_server::api::create_router(state);
+
+    let telemetry = json!({
+        "topic": "storage/write_err",
+        "payload": {
+            "service": "flux-rtmpd",
+            "stream_id": "rtmp/live/test",
+            "error": "disk full"
+        }
+    });
+
+    let request = Request::builder()
+        .uri("/api/v1/storage/telemetry")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&telemetry).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
+        .await
+        .expect("Timeout")
+        .expect("Failed to receive");
+
+    let request = Request::builder()
+        .uri("/api/v1/storage/telemetry/stats?topic_prefix=storage/")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["topic_prefix"], "storage/");
+    assert!(json["rows_scanned"].as_u64().unwrap_or(0) >= 0);
+    assert!(json["items"].is_array());
+}
+
 async fn create_test_state() -> Arc<AppState> {
     let event_bus = Arc::new(EventBus::new(100));
     let plugin_manager = Arc::new(PluginManager::new().unwrap());
@@ -25,21 +114,24 @@ async fn create_test_state() -> Arc<AppState> {
     let db = create_test_db().await;
 
     // 创建表结构
-    use flux_core::entity::rules;
+    use flux_core::entity::{events, rules};
     let schema = Schema::new(sea_orm::DatabaseBackend::Sqlite);
-    let stmt = schema.create_table_from_entity(rules::Entity);
     let builder = db.get_database_backend();
-    let _result = db
-        .execute(builder.build(&stmt))
-        .await
-        .expect("Failed to create table");
+
+    let stmt = schema.create_table_from_entity(rules::Entity);
+    let _result = db.execute(builder.build(&stmt)).await.expect("Failed to create table");
+
+    let stmt = schema.create_table_from_entity(events::Entity);
+    let _result = db.execute(builder.build(&stmt)).await.expect("Failed to create table");
 
     let (_tx, rx) = watch::channel(AppConfig::default());
+    let storage_manager = Arc::new(StorageManager::new());
 
     Arc::new(AppState {
         event_bus,
         plugin_manager,
         script_engine,
+        storage_manager,
         db,
         config_db: None,
         config: rx,

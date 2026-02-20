@@ -6,6 +6,13 @@ http_bind = "0.0.0.0:8083"
 storage_dir = "./data/rtsp/storage"
 keyframe_dir = "./data/rtsp/keyframes"
 
+[[storage.pools]]
+name = "rtsp-ssd"
+path = "./data-fast"
+disk_type = "SSD"
+priority = 1
+max_usage_percent = 90.0
+
 [timeshift]
 # RTSP 时移配置（使用全局默认值）
 enabled = true

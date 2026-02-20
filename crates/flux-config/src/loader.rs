@@ -3,6 +3,7 @@ use config::{Config, File, FileFormat};
 use std::path::{Path, PathBuf};
 
 use crate::{GlobalConfig, TimeShiftMergedConfig};
+use flux_storage::{DiskType, PoolConfig};
 
 /// 配置加载器
 pub struct ConfigLoader {
@@ -78,6 +79,66 @@ impl ConfigLoader {
         // 使用全局配置
         Ok(crate::timeshift::TimeShiftProtocolConfig::default()
             .merge_with_global(&global.timeshift))
+    }
+
+    /// 加载存储池配置（多池）
+    ///
+    /// - 如果 config 目录下既没有 global.toml，也没有对应协议的配置文件，则返回 Ok(None)
+    /// - 如果存在配置但未配置 pools，则使用 global.storage.root_dir 作为默认单池
+    pub fn load_storage_pools(&self, protocol_name: &str) -> Result<Option<Vec<PoolConfig>>> {
+        let global_path = self.config_dir.join("global.toml");
+        let protocol_path = self
+            .config_dir
+            .join("protocols")
+            .join(format!("{}.toml", protocol_name));
+
+        if !global_path.exists() && !protocol_path.exists() {
+            return Ok(None);
+        }
+
+        let global = self.load_global()?;
+
+        // 优先协议覆盖
+        let mut pools_cfg: Option<Vec<crate::StoragePoolConfig>> = None;
+        if protocol_path.exists() {
+            if let Ok(protocol_cfg) = self.load_protocol::<serde_json::Value>(protocol_name) {
+                if let Some(storage_cfg) = protocol_cfg.storage {
+                    if let Some(pools) = storage_cfg.pools {
+                        if !pools.is_empty() {
+                            pools_cfg = Some(pools);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 使用全局 pools
+        let pools_cfg = pools_cfg.unwrap_or_else(|| {
+            if !global.storage.pools.is_empty() {
+                global.storage.pools.clone()
+            } else {
+                vec![crate::StoragePoolConfig {
+                    name: "default".to_string(),
+                    path: global.storage.root_dir.clone(),
+                    disk_type: DiskType::Unknown,
+                    priority: 1,
+                    max_usage_percent: 95.0,
+                }]
+            }
+        });
+
+        let pools = pools_cfg
+            .into_iter()
+            .map(|p| PoolConfig {
+                name: p.name,
+                path: p.path,
+                disk_type: p.disk_type,
+                priority: p.priority,
+                max_usage_percent: p.max_usage_percent,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(pools))
     }
 
     /// 验证配置

@@ -1,0 +1,19 @@
+[server]
+http_bind = "0.0.0.0:8081"
+sip_bind = "0.0.0.0:5060"
+rtp_bind = "0.0.0.0:9000"
+
+[storage]
+storage_dir = "./data/gb28181/storage"
+keyframe_dir = "./data/gb28181/keyframes"
+
+[[storage.pools]]
+name = "gb28181-ssd"
+path = "./data-fast"
+disk_type = "SSD"
+priority = 1
+max_usage_percent = 90.0
+
+[timeshift]
+# GB28181 默认不启用时移（需要时可以开启）
+enabled = false

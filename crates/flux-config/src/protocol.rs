@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::global::StoragePoolConfig;
 use crate::timeshift::TimeShiftProtocolConfig;
 
 /// 协议配置（泛型，支持不同协议的服务器配置）
@@ -18,6 +19,8 @@ pub struct ProtocolConfig<T> {
 pub struct ProtocolStorageConfig {
     pub storage_dir: PathBuf,
     pub keyframe_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub pools: Option<Vec<StoragePoolConfig>>,
 }
 
 #[cfg(test)]
@@ -38,6 +41,7 @@ mod tests {
             storage: Some(ProtocolStorageConfig {
                 storage_dir: PathBuf::from("./data/test"),
                 keyframe_dir: None,
+                pools: None,
             }),
             timeshift: None,
         };

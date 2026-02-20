@@ -1,0 +1,34 @@
+# RTMP 协议录像配置（覆盖全局配置）
+
+[recording]
+enabled = true
+retention_days = 30             # RTMP 保留 30 天（覆盖全局 7 天）
+
+# 分片配置（继承全局）
+[recording.segment]
+strategy = "adaptive"
+min_duration = 60
+max_duration = 300
+target_size_mb = 100            # RTMP 使用更大的分片（覆盖全局 75 MB）
+
+# 压缩配置（继承全局）
+[recording.compression]
+realtime = "lz4"
+archive = "zstd"
+longterm = "brotli"
+apply_archive_after_hours = 48  # RTMP 48小时后压缩（覆盖全局 24小时）
+
+# 质量配置（继承全局）
+[recording.quality]
+realtime = "high"               # 1080p
+archive = "medium"              # 720p
+downgrade_after_hours = 48      # 48小时后降级
+
+# 转换配置（继承全局）
+[recording.conversion]
+enabled = true
+trigger_after_hours = 48
+target_quality = "medium"
+merge_files = true
+merge_duration = 600
+concurrency = 4

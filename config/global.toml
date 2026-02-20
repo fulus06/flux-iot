@@ -19,3 +19,17 @@ lru_cache_size_mb = 500
 # 全局存储配置
 root_dir = "./data"
 retention_days = 7
+
+[[storage.pools]]
+name = "fast-ssd"
+path = "./data-fast"
+disk_type = "SSD"
+priority = 1
+max_usage_percent = 90.0
+
+[[storage.pools]]
+name = "bulk-hdd"
+path = "./data-bulk"
+disk_type = "HDD"
+priority = 2
+max_usage_percent = 95.0

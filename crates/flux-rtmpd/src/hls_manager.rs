@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use flux_media_core::playback::{HlsGenerator, TsMuxer};
 use flux_media_core::timeshift::{Segment, SegmentFormat, SegmentMetadata, TimeShiftCore};
 use flux_media_core::types::StreamId;
+use flux_storage::StorageManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,16 +13,21 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info};
 
+use crate::telemetry::TelemetryClient;
+
 /// HLS 管理器：负责将 RTMP 流转换为 HLS
 pub struct HlsManager {
     generators: Arc<RwLock<HashMap<String, Arc<HlsStreamContext>>>>,
     storage_dir: PathBuf,
     timeshift: Option<Arc<TimeShiftCore>>,
+    storage_manager: Option<Arc<StorageManager>>,
+    telemetry: TelemetryClient,
 }
 
 /// HLS 流上下文
 pub struct HlsStreamContext {
     pub stream_id: StreamId,
+    pub segment_dir: PathBuf,
     pub hls_generator: Arc<RwLock<HlsGenerator>>,
     pub ts_muxer: Arc<RwLock<TsMuxer>>,
     pub current_segment: Arc<RwLock<SegmentBuffer>>,
@@ -38,14 +44,25 @@ pub struct SegmentBuffer {
 
 impl HlsManager {
     pub fn new(storage_dir: PathBuf) -> Self {
-        Self::with_timeshift(storage_dir, None)
+        Self::with_timeshift_and_storage(storage_dir, None, None, TelemetryClient::new(None, 1000))
     }
     
     pub fn with_timeshift(storage_dir: PathBuf, timeshift: Option<Arc<TimeShiftCore>>) -> Self {
+        Self::with_timeshift_and_storage(storage_dir, timeshift, None, TelemetryClient::new(None, 1000))
+    }
+
+    pub fn with_timeshift_and_storage(
+        storage_dir: PathBuf,
+        timeshift: Option<Arc<TimeShiftCore>>,
+        storage_manager: Option<Arc<StorageManager>>,
+        telemetry: TelemetryClient,
+    ) -> Self {
         Self {
             generators: Arc::new(RwLock::new(HashMap::new())),
             storage_dir,
             timeshift,
+            storage_manager,
+            telemetry,
         }
     }
 
@@ -59,6 +76,21 @@ impl HlsManager {
         let stream_id = StreamId::new("rtmp", &format!("{}/{}", app_name, stream_key));
         let key = format!("{}/{}", app_name, stream_key);
 
+        let base_dir = if let Some(storage_manager) = &self.storage_manager {
+            storage_manager
+                .select_pool(0)
+                .await
+                .unwrap_or_else(|_| self.storage_dir.clone())
+        } else {
+            self.storage_dir.clone()
+        };
+
+        let segment_dir = if self.storage_manager.is_some() {
+            base_dir.join("hls").join(stream_id.as_str())
+        } else {
+            base_dir.join(stream_id.as_str())
+        };
+
         let hls_generator = Arc::new(RwLock::new(HlsGenerator::new(
             stream_id.clone(),
             segment_duration,
@@ -69,6 +101,7 @@ impl HlsManager {
 
         let context = HlsStreamContext {
             stream_id,
+            segment_dir,
             hls_generator,
             ts_muxer,
             current_segment: Arc::new(RwLock::new(SegmentBuffer {
@@ -176,12 +209,12 @@ impl HlsManager {
         let segment_info = hls_generator.add_segment(duration, total_size).await?;
 
         // 保存 TS 分片到磁盘
-        let stream_dir = self.storage_dir.join(context.stream_id.as_str());
+        let stream_dir = context.segment_dir.clone();
         if let Err(e) = fs::create_dir_all(&stream_dir).await {
             error!(target: "hls_manager", "Failed to create stream directory: {}", e);
         } else {
             let segment_path = stream_dir.join(&segment_info.filename);
-            
+
             // 合并所有 TS 包
             let mut ts_data = Vec::new();
             for packet in &segment.data {
@@ -189,39 +222,65 @@ impl HlsManager {
             }
 
             // 写入文件
-            if let Ok(mut file) = fs::File::create(&segment_path).await {
-                if let Err(e) = file.write_all(&ts_data).await {
-                    error!(target: "hls_manager", "Failed to write segment: {}", e);
-                } else {
-                    info!(target: "hls_manager", 
-                        stream_id = %context.stream_id,
-                        filename = %segment_info.filename,
-                        duration = duration,
-                        size = total_size,
-                        "HLS segment saved"
-                    );
-                
-                // 添加到时移管理器
-                if let Some(ref timeshift) = self.timeshift {
-                    let ts_segment = Segment {
-                        sequence: segment_info.sequence,
-                        start_time: Utc::now() - Duration::milliseconds((duration * 1000.0) as i64),
-                        duration,
-                        data: Bytes::from(ts_data.clone()),
-                        metadata: SegmentMetadata {
-                            format: SegmentFormat::Ts,
-                            has_keyframe: true,
-                            file_path: Some(segment_path.clone()),
-                            size: total_size as u64,
-                        },
-                    };
-                    
-                    if let Err(e) = timeshift.add_segment(&context.stream_id.as_str(), ts_segment).await {
-                        error!(target: "hls_manager", "Failed to add segment to timeshift: {}", e);
+            match fs::File::create(&segment_path).await {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(&ts_data).await {
+                        error!(target: "hls_manager", "Failed to write segment: {}", e);
+                    } else {
+                        info!(target: "hls_manager", 
+                            stream_id = %context.stream_id,
+                            filename = %segment_info.filename,
+                            duration = duration,
+                            size = total_size,
+                            "HLS segment saved"
+                        );
+
+                        if self.telemetry.enabled() {
+                            self.telemetry
+                                .post_sampled(
+                                    "storage/segment_finalized",
+                                    serde_json::json!({
+                                        "service": "flux-rtmpd",
+                                        "stream_id": context.stream_id.as_str(),
+                                        "sequence": segment_info.sequence,
+                                        "filename": segment_info.filename,
+                                        "bytes": total_size,
+                                        "duration": duration,
+                                    }),
+                                    50,
+                                )
+                                .await;
+                        }
+
+                        // 添加到时移管理器
+                        if let Some(ref timeshift) = self.timeshift {
+                            let ts_segment = Segment {
+                                sequence: segment_info.sequence,
+                                start_time: Utc::now()
+                                    - Duration::milliseconds((duration * 1000.0) as i64),
+                                duration,
+                                data: Bytes::from(ts_data.clone()),
+                                metadata: SegmentMetadata {
+                                    format: SegmentFormat::Ts,
+                                    has_keyframe: true,
+                                    file_path: Some(segment_path.clone()),
+                                    size: total_size as u64,
+                                },
+                            };
+
+                            if let Err(e) = timeshift
+                                .add_segment(&context.stream_id.as_str(), ts_segment)
+                                .await
+                            {
+                                error!(target: "hls_manager", "Failed to add segment to timeshift: {}", e);
+                            }
+                        }
                     }
                 }
+                Err(e) => {
+                    error!(target: "hls_manager", "Failed to create segment file: {}", e);
+                }
             }
-        }
         }
 
         // 清空当前分片
@@ -261,11 +320,13 @@ impl HlsManager {
                 .ok_or_else(|| anyhow!("Stream not found: {}", key))?;
             
             // 从时移获取分片
-            let segments = timeshift.get_segments_from(
-                &context.stream_id.as_str(),
-                start,
-                Some(SegmentFormat::Ts),
-            ).await?;
+            let segments = timeshift
+                .get_segments_from(
+                    &context.stream_id.as_str(),
+                    start,
+                    Some(SegmentFormat::Ts),
+                )
+                .await?;
             
             // 生成 M3U8
             return self.build_m3u8_from_segments(&segments);
@@ -290,7 +351,7 @@ impl HlsManager {
             
             if let Some(segment_info) = hls_generator.get_segment(sequence).await {
                 // 从磁盘读取 TS 数据
-                let stream_dir = self.storage_dir.join(context.stream_id.as_str());
+                let stream_dir = context.segment_dir.clone();
                 let segment_path = stream_dir.join(&segment_info.filename);
 
                 match fs::read(&segment_path).await {

@@ -9,20 +9,25 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
+use crate::telemetry::TelemetryClient;
+
 /// 媒体处理器：负责处理 RTMP 推流的音视频数据
 pub struct MediaProcessor {
     storage: Arc<RwLock<FileSystemStorage>>,
     orchestrator: Arc<SnapshotOrchestrator>,
+    telemetry: TelemetryClient,
 }
 
 impl MediaProcessor {
     pub fn new(
         storage: Arc<RwLock<FileSystemStorage>>,
         orchestrator: Arc<SnapshotOrchestrator>,
+        telemetry: TelemetryClient,
     ) -> Self {
         Self {
             storage,
             orchestrator,
+            telemetry,
         }
     }
 
@@ -61,10 +66,39 @@ impl MediaProcessor {
 
         // 存储视频数据
         let mut storage = self.storage.write().await;
-        storage
+        if let Err(e) = storage
             .put_object(stream_id, sample.timestamp, sample.data.clone())
             .await
-            .map_err(|e| anyhow::anyhow!("Storage error: {}", e))?;
+        {
+            if self.telemetry.enabled() {
+                self.telemetry
+                    .post(
+                        "storage/write_err",
+                        serde_json::json!({
+                            "service": "flux-rtmpd",
+                            "stream_id": stream_id.as_str(),
+                            "error": e.to_string(),
+                        }),
+                    )
+                    .await;
+            }
+
+            return Err(anyhow::anyhow!("Storage error: {}", e));
+        }
+
+        if self.telemetry.enabled() {
+            self.telemetry
+                .post_sampled(
+                    "storage/write_ok",
+                    serde_json::json!({
+                        "service": "flux-rtmpd",
+                        "stream_id": stream_id.as_str(),
+                        "bytes": sample.data.len(),
+                    }),
+                    200,
+                )
+                .await;
+        }
 
         drop(storage);
 

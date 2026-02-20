@@ -5,6 +5,16 @@ http_bind = "0.0.0.0:8085"
 storage_dir = "./data/srt/storage"
 keyframe_dir = "./data/srt/keyframes"
 
+[[storage.pools]]
+name = "srt-default"
+path = "./data-fast"
+disk_type = "SSD"
+priority = 1
+max_usage_percent = 92.0
+
 [timeshift]
-# SRT 时移配置（低延迟场景，默认不启用）
-enabled = false
+# SRT 时移配置（低延迟场景，使用较短的时移时长）
+enabled = true
+hot_cache_duration = 300      # 5 分钟（适合低延迟场景）
+cold_storage_duration = 1800  # 30 分钟（比 RTMP 短）
+# max_segments 继承全局配置

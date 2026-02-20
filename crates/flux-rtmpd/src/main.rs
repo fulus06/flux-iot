@@ -2,6 +2,7 @@ mod hls_manager;
 mod media_processor;
 mod rtmp_server;
 mod stream_manager;
+mod telemetry;
 
 use axum::{
     extract::{Path, State},
@@ -18,9 +19,11 @@ use flux_media_core::{
     storage::{filesystem::FileSystemStorage, StorageConfig},
     types::StreamId,
 };
+use flux_storage::{DiskType, PoolConfig, StorageManager};
 use rtmp_server::RtmpServer;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
+use telemetry::TelemetryClient;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "FLUX RTMP Media Server")]
@@ -36,6 +39,12 @@ struct Args {
 
     #[arg(long, default_value = "./data/rtmp/keyframes")]
     keyframe_dir: String,
+
+    #[arg(long)]
+    telemetry_endpoint: Option<String>,
+
+    #[arg(long, default_value_t = 1000)]
+    telemetry_timeout_ms: u64,
 }
 
 #[derive(Clone)]
@@ -303,9 +312,59 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    // 加载配置（用于存储池多池配置）
+    let config_loader = flux_config::ConfigLoader::new("./config");
+
     // 初始化存储
+    // 初始化统一存储池（flux-storage）
+    let storage_manager = Arc::new(StorageManager::new());
+    let pool_configs = match config_loader.load_storage_pools("rtmp") {
+        Ok(Some(pools)) => pools,
+        Ok(None) => vec![PoolConfig {
+            name: "default".to_string(),
+            path: PathBuf::from(&args.storage_dir),
+            disk_type: DiskType::Unknown,
+            priority: 1,
+            max_usage_percent: 95.0,
+        }],
+        Err(e) => {
+            tracing::warn!(target: "rtmpd", "Failed to load storage pools config, fallback to CLI storage_dir: {}", e);
+            vec![PoolConfig {
+                name: "default".to_string(),
+                path: PathBuf::from(&args.storage_dir),
+                disk_type: DiskType::Unknown,
+                priority: 1,
+                max_usage_percent: 95.0,
+            }]
+        }
+    };
+    if let Err(e) = storage_manager.initialize(pool_configs).await {
+        tracing::warn!(target: "rtmpd", "StorageManager initialize failed, fallback to local dir: {}", e);
+    }
+
+    let selected_root = storage_manager
+        .select_pool(0)
+        .await
+        .unwrap_or_else(|_| PathBuf::from(&args.storage_dir))
+        .join("rtmp");
+
+    let telemetry = TelemetryClient::new(args.telemetry_endpoint.clone(), args.telemetry_timeout_ms);
+    if telemetry.enabled() {
+        telemetry
+            .post(
+                "storage/service_start",
+                serde_json::json!({
+                    "service": "flux-rtmpd",
+                    "selected_root": selected_root.to_string_lossy().to_string(),
+                    "storage_dir": args.storage_dir,
+                    "keyframe_dir": args.keyframe_dir,
+                }),
+            )
+            .await;
+    }
+
     let storage_config = StorageConfig {
-        root_dir: PathBuf::from(&args.storage_dir),
+        root_dir: selected_root,
         retention_days: 7,
         segment_duration_secs: 60,
     };
@@ -318,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
     let media_processor = Arc::new(media_processor::MediaProcessor::new(
         storage.clone(),
         orchestrator.clone(),
+        telemetry.clone(),
     ));
 
     // 创建流管理器
@@ -333,9 +393,11 @@ async fn main() -> anyhow::Result<()> {
     
     // 创建 HLS 管理器（集成时移）
     let hls_dir = PathBuf::from("./data/hls");
-    let hls_manager = Arc::new(hls_manager::HlsManager::with_timeshift(
+    let hls_manager = Arc::new(hls_manager::HlsManager::with_timeshift_and_storage(
         hls_dir,
-        Some(timeshift)
+        Some(timeshift),
+        Some(storage_manager),
+        telemetry.clone(),
     ));
 
     // 启动 RTMP 服务器
