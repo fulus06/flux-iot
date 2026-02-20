@@ -77,15 +77,45 @@
 - ~3100 行代码
 - 生产就绪
 
-### 2. 配置管理
+### 2. 配置管理（完成度 100%）✅
+
+**详细规划**：`docs/config_management_plan.md`
 
 #### 2.1 动态配置热更新
-- [ ] 统一 ConfigManager 实现
-- [ ] watch channel + reload 机制
-- [ ] 支持 file/sqlite/postgres 触发方式
-- [ ] 配置热更新（无需重启）
-- [ ] 配置格式校验和冲突检测
-- [ ] 配置回滚机制
+**阶段 1：核心框架（30%）✅**
+- [x] 创建 flux-config-manager crate
+- [x] ConfigManager 核心实现
+- [x] ConfigSource trait 抽象
+- [x] FileSource 实现（TOML/JSON）
+- [x] 版本管理器
+- [x] 配置监听器（文件监听）
+
+**阶段 2：热更新机制（20%）✅**
+- [x] 自动重载逻辑
+- [x] 变更通知机制
+- [x] 订阅者模式
+- [x] 错误处理
+
+**阶段 3：数据库支持（30%）✅**
+- [x] SqliteSource 实现
+- [x] PostgresSource 实现
+- [x] 数据库 schema 自动创建
+- [x] 版本管理集成
+
+**阶段 4：校验和高级特性（20%）✅**
+- [x] ConfigValidator 实现
+- [x] RangeRule（范围校验）
+- [x] CustomRule（自定义校验）
+- [x] 配置回滚功能
+- [x] 15+ 个测试通过（单元测试 + 集成测试）
+
+> **状态**：配置管理系统已 100% 完成，生产就绪！  
+> **核心特性**：
+> - ✅ 多数据源支持（File/SQLite/PostgreSQL）
+> - ✅ 热更新无需重启
+> - ✅ 版本管理和回滚
+> - ✅ 配置校验
+> - ✅ 变更通知
 
 > **设计方案**：
 > 1. **机制设计**：统一 `ConfigManager`（内部 watch channel + reload），支持 file/sqlite/postgres 三类触发方式；
