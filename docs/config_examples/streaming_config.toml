@@ -1,0 +1,121 @@
+# FLUX IOT 流媒体配置示例
+
+# ============================================
+# 方案 A：纯直通模式（最低成本）
+# ============================================
+[streaming.transcode]
+enabled = true
+mode = { type = "passthrough", remux = true }
+
+# 输出协议
+[[streaming.outputs]]
+type = "hls"
+
+[[streaming.outputs]]
+type = "flv"
+
+
+# ============================================
+# 方案 B：按需转码（推荐）- 协议切换触发
+# ============================================
+# [streaming.transcode]
+# enabled = true
+# mode = { type = "auto", triggers = [
+#     { type = "protocol_switch" }
+# ]}
+# 
+# # 硬件加速（可选）
+# hardware_accel = "nvenc"  # 或 "qsv", "videotoolbox", "vaapi"
+# 
+# # 目标码率配置
+# [[streaming.transcode.bitrates]]
+# name = "high"
+# bitrate = 2000
+# resolution = [1920, 1080]
+# framerate = 25.0
+# encoder_preset = "fast"
+# 
+# [[streaming.transcode.bitrates]]
+# name = "medium"
+# bitrate = 1000
+# resolution = [1280, 720]
+# framerate = 25.0
+# encoder_preset = "fast"
+# 
+# [[streaming.transcode.bitrates]]
+# name = "low"
+# bitrate = 500
+# resolution = [640, 360]
+# framerate = 25.0
+# encoder_preset = "veryfast"
+
+
+# ============================================
+# 方案 C：按需转码 - 多触发条件组合
+# ============================================
+# [streaming.transcode]
+# enabled = true
+# mode = { type = "auto", triggers = [
+#     { type = "protocol_switch" },
+#     { type = "client_threshold", count = 5 },
+#     { type = "client_variety" },
+#     { type = "network_variance", threshold = 0.5 }
+# ]}
+# 
+# hardware_accel = "nvenc"
+# 
+# # 使用默认码率配置（high/medium/low）
+
+
+# ============================================
+# 方案 D：全转码模式
+# ============================================
+# [streaming.transcode]
+# enabled = true
+# mode = { type = "transcode" }
+# hardware_accel = "nvenc"
+# 
+# # 自定义码率配置
+# [[streaming.transcode.bitrates]]
+# name = "ultra"
+# bitrate = 4000
+# resolution = [1920, 1080]
+# framerate = 30.0
+# encoder_preset = "medium"
+# 
+# [[streaming.transcode.bitrates]]
+# name = "high"
+# bitrate = 2000
+# resolution = [1920, 1080]
+# framerate = 25.0
+# encoder_preset = "fast"
+# 
+# [[streaming.transcode.bitrates]]
+# name = "medium"
+# bitrate = 1000
+# resolution = [1280, 720]
+# framerate = 25.0
+# encoder_preset = "fast"
+# 
+# [[streaming.transcode.bitrates]]
+# name = "low"
+# bitrate = 500
+# resolution = [640, 360]
+# framerate = 15.0
+# encoder_preset = "veryfast"
+
+
+# ============================================
+# 输出协议配置
+# ============================================
+# [[streaming.outputs]]
+# type = "hls"
+# 
+# [[streaming.outputs]]
+# type = "flv"
+# 
+# [[streaming.outputs]]
+# type = "rtmp"
+# 
+# [[streaming.outputs]]
+# type = "rtsp"
