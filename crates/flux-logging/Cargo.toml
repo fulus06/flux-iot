@@ -1,0 +1,23 @@
+[package]
+name = "flux-logging"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-opentelemetry = "0.18"
+opentelemetry = { version = "0.18", features = ["trace", "rt-tokio"] }
+opentelemetry-jaeger = { version = "0.17", features = ["rt-tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1.35", features = ["full"] }
+rand = "0.8"
+thiserror = "1.0"
+async-trait = "0.1"
+hostname = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
