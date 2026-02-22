@@ -1,9 +1,18 @@
 use flux_device::{
     Device, DeviceFilter, DeviceGroup, DeviceManager, DeviceStatus, DeviceType, Protocol,
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{Database, DatabaseConnection};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+
+/// 创建测试数据库连接（PostgreSQL）
+async fn create_test_db() -> DatabaseConnection {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/flux_test".to_string());
+    Database::connect(&database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL")
+}
 
 /// 创建测试设备
 fn create_test_device(name: &str, device_type: DeviceType) -> Device {
@@ -13,7 +22,7 @@ fn create_test_device(name: &str, device_type: DeviceType) -> Device {
 /// 测试设备完整生命周期
 #[tokio::test]
 async fn test_device_lifecycle() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
     manager.start().await;
 
@@ -58,7 +67,7 @@ async fn test_device_lifecycle() {
 /// 测试设备分组完整流程
 #[tokio::test]
 async fn test_device_grouping() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 1. 创建分组层级：一楼 -> 101房间
@@ -106,7 +115,7 @@ async fn test_device_grouping() {
 /// 测试设备监控和心跳
 #[tokio::test]
 async fn test_device_monitoring() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 1, 2); // 1秒心跳间隔，2秒超时
     manager.start().await;
 
@@ -135,7 +144,7 @@ async fn test_device_monitoring() {
 /// 测试设备过滤和查询
 #[tokio::test]
 async fn test_device_filtering() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 注册不同类型的设备
@@ -172,7 +181,7 @@ async fn test_device_filtering() {
 /// 测试设备指标记录
 #[tokio::test]
 async fn test_device_metrics() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 注册设备
@@ -209,7 +218,7 @@ async fn test_device_metrics() {
 /// 测试并发操作
 #[tokio::test]
 async fn test_concurrent_operations() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = Arc::new(DeviceManager::new(db, 30, 60));
 
     // 并发注册多个设备
@@ -237,7 +246,7 @@ async fn test_concurrent_operations() {
 /// 测试分组移动
 #[tokio::test]
 async fn test_group_movement() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 创建分组结构
@@ -267,7 +276,7 @@ async fn test_group_movement() {
 /// 测试设备状态变更
 #[tokio::test]
 async fn test_device_status_changes() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 注册设备
@@ -296,7 +305,7 @@ async fn test_device_status_changes() {
 /// 测试在线/离线统计
 #[tokio::test]
 async fn test_online_offline_count() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 注册5个设备
@@ -324,7 +333,7 @@ async fn test_online_offline_count() {
 /// 测试设备标签功能
 #[tokio::test]
 async fn test_device_tags() {
-    let db = Arc::new(DatabaseConnection::default());
+    let db = Arc::new(create_test_db().await);
     let manager = DeviceManager::new(db, 30, 60);
 
     // 注册设备并添加标签
