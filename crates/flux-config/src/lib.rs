@@ -10,7 +10,7 @@ pub use loader::ConfigLoader;
 pub use protocol::{ProtocolConfig, ProtocolStorageConfig};
 pub use recording::{RecordingConfig, RecordingSegmentConfig, RecordingCompressionConfig, RecordingQualityConfig, RecordingConversionConfig};
 pub use streaming::{
-    StreamingConfig, TranscodeConfig, TranscodeMode, TranscodeTrigger,
+    StreamingConfig, TranscodeConfig, StreamMode, TranscodeTrigger,
     HardwareAccel, BitrateConfig, OutputProtocol,
 };
 pub use timeshift::{TimeShiftGlobalConfig, TimeShiftMergedConfig, TimeShiftProtocolConfig};

@@ -1,0 +1,21 @@
+[package]
+name = "flux-modbus"
+version = "0.1.0"
+edition = "2021"
+authors = ["FLUX IOT Team"]
+description = "Modbus protocol implementation for FLUX IOT platform"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-modbus = "0.13"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+
+# Workspace dependencies
+flux-protocol = { path = "../flux-protocol" }
+flux-core = { path = "../flux-core" }
+flux-types = { path = "../flux-types" }

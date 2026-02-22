@@ -21,7 +21,7 @@ pub struct TranscodeConfig {
     
     /// 工作模式
     #[serde(default)]
-    pub mode: TranscodeMode,
+    pub mode: StreamMode,
     
     /// 硬件加速类型
     #[serde(default)]
@@ -32,10 +32,10 @@ pub struct TranscodeConfig {
     pub bitrates: Vec<BitrateConfig>,
 }
 
-/// 转码模式
+/// 流工作模式
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum TranscodeMode {
+pub enum StreamMode {
     /// 直通模式（零转码）
     Passthrough {
         /// 是否需要重新封装
@@ -168,7 +168,7 @@ impl Default for TranscodeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            mode: TranscodeMode::default(),
+            mode: StreamMode::default(),
             hardware_accel: None,
             bitrates: vec![
                 BitrateConfig {
@@ -197,10 +197,10 @@ impl Default for TranscodeConfig {
     }
 }
 
-impl Default for TranscodeMode {
+impl Default for StreamMode {
     fn default() -> Self {
         // 默认使用自动模式，协议切换时触发转码
-        TranscodeMode::Auto {
+        StreamMode::Auto {
             triggers: vec![TranscodeTrigger::ProtocolSwitch],
         }
     }
@@ -213,13 +213,13 @@ mod tests {
     #[test]
     fn test_default_streaming_config() {
         let config = StreamingConfig::default();
-        assert!(matches!(config.transcode.mode, TranscodeMode::Auto { .. }));
+        assert!(matches!(config.transcode.mode, StreamMode::Auto { .. }));
         assert_eq!(config.outputs.len(), 2);
     }
 
     #[test]
-    fn test_transcode_mode_passthrough() {
-        let mode = TranscodeMode::Passthrough { remux: true };
+    fn test_stream_mode_passthrough() {
+        let mode = StreamMode::Passthrough { remux: true };
         let json = serde_json::to_string(&mode).unwrap();
         assert!(json.contains("passthrough"));
     }

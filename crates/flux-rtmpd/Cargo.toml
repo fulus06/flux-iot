@@ -17,15 +17,19 @@ chrono = "0.4"
 clap = { version = "4.4", features = ["derive"] }
 flux-config = { path = "../flux-config" }
 flux-media-core = { path = "../flux-media-core" }
+flux-middleware = { path = "../flux-middleware" }
 flux-storage = { path = "../flux-storage" }
+flux-stream = { path = "../flux-stream" }
 futures = "0.3"
 rml_rtmp = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.35", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -13,6 +13,7 @@ pub struct Handler {
     event_bus: Arc<EventBus>,
     authenticator: Arc<dyn Authenticator>,
     client_id: Option<String>,
+    username: Option<String>,
 }
 
 impl Handler {
@@ -26,6 +27,7 @@ impl Handler {
             event_bus,
             authenticator,
             client_id: None,
+            username: None,
         }
     }
 
@@ -35,6 +37,17 @@ impl Handler {
             event_bus: self.event_bus.clone(),
             authenticator: self.authenticator.clone(),
             client_id: Some(client_id),
+            username: self.username.clone(),
+        }
+    }
+
+    pub fn with_username(&self, username: String) -> Self {
+        Self {
+            manager: self.manager.clone(),
+            event_bus: self.event_bus.clone(),
+            authenticator: self.authenticator.clone(),
+            client_id: self.client_id.clone(),
+            username: Some(username),
         }
     }
 }
@@ -98,7 +111,21 @@ pub async fn control_v3(
     match control {
         v3::Control::Protocol(v3::CtlFrame::Subscribe(mut sub)) => {
             for mut s in &mut sub {
-                s.subscribe(v3::QoS::AtLeastOnce);
+                // 尊重客户端请求的 QoS，但最高支持 QoS 1
+                // QoS 2 降级为 QoS 1（暂不支持 Exactly Once）
+                let requested_qos = s.qos();
+                let granted_qos = match requested_qos {
+                    v3::QoS::AtMostOnce => v3::QoS::AtMostOnce,
+                    v3::QoS::AtLeastOnce => v3::QoS::AtLeastOnce,
+                    v3::QoS::ExactlyOnce => v3::QoS::AtLeastOnce, // 降级
+                };
+                s.subscribe(granted_qos);
+                tracing::debug!(
+                    topic = %s.topic(),
+                    requested = ?requested_qos,
+                    granted = ?granted_qos,
+                    "Subscribe with QoS"
+                );
             }
             Ok(sub.ack())
         }
@@ -181,7 +208,13 @@ pub async fn control_v5(
     match control {
         v5::Control::Protocol(v5::CtlFrame::Subscribe(mut sub)) => {
             for mut s in &mut sub {
+                // V5 API: 直接订阅，QoS 由 ntex-mqtt 处理
+                // 支持 QoS 0 和 QoS 1，QoS 2 会被降级
                 s.subscribe(v5::QoS::AtLeastOnce);
+                tracing::debug!(
+                    topic = %s.topic(),
+                    "Subscribe (V5)"
+                );
             }
             Ok(sub.ack())
         }

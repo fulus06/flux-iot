@@ -1,0 +1,25 @@
+[package]
+name = "flux-control-api"
+version = "0.1.0"
+edition = "2021"
+authors = ["FLUX IOT Team"]
+description = "REST API for device control functionality"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+sea-orm = { version = "0.12", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
+
+# Workspace dependencies
+flux-core = { path = "../flux-core" }
+flux-types = { path = "../flux-types" }
+flux-control = { path = "../flux-control", features = ["persistence", "mqtt"] }
+flux-device = { path = "../flux-device" }

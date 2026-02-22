@@ -1,6 +1,7 @@
 use flux_types::message::Message;
-use rhai::{Engine, Scope, AST};
+use rhai::{Engine, Scope, AST, Dynamic};
 use std::sync::{Arc, RwLock};
+use anyhow::Result;
 
 pub struct ScriptEngine {
     engine: Engine,
@@ -104,6 +105,26 @@ impl ScriptEngine {
 
         let result: bool = self.engine.eval_ast_with_scope(&mut scope, ast)?;
         Ok(result)
+    }
+
+    pub fn eval(&self, script: &str) -> Result<Dynamic> {
+        self.engine.eval(script).map_err(|e| anyhow::anyhow!("{}", e))
+    }
+    
+    /// 编译脚本（验证语法）
+    pub fn compile(&self, script: &str) -> Result<()> {
+        self.engine.compile(script).map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
+    
+    /// 使用作用域执行脚本
+    pub fn eval_with_scope(&self, scope: &mut rhai::Scope, script: &str) -> Result<Dynamic> {
+        self.engine.eval_with_scope(scope, script).map_err(|e| anyhow::anyhow!("{}", e))
+    }
+    
+    /// 获取内部 Rhai 引擎的可变引用（用于注册函数）
+    pub fn engine_mut(&mut self) -> &mut Engine {
+        &mut self.engine
     }
 
     pub fn get_script_ids(&self) -> Vec<String> {

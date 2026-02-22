@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use flux_media_core::playback::{FlvMuxer, FlvTag, FlvTagType};
+use flux_media_core::playback::flv::{FlvMuxer, FlvTag, FlvTagType};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
@@ -42,7 +42,7 @@ impl HttpFlvServer {
         // 订阅流
         let (video_rx, audio_rx) = match self
             .stream_manager
-            .subscribe_stream(&app_name, &stream_key)
+            .subscribe(&app_name, &stream_key)
             .await
         {
             Ok(rx) => rx,
@@ -68,8 +68,8 @@ impl HttpFlvServer {
 
 /// 创建 FLV 流
 fn create_flv_stream(
-    video_rx: broadcast::Receiver<(Bytes, u32, bool)>,
-    audio_rx: broadcast::Receiver<(Bytes, u32)>,
+    video_rx: broadcast::Receiver<crate::stream_manager::MediaPacket>,
+    audio_rx: broadcast::Receiver<crate::stream_manager::MediaPacket>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
     async_stream::stream! {
         let mut flv_muxer = FlvMuxer::new();
@@ -85,17 +85,17 @@ fn create_flv_stream(
         loop {
             tokio::select! {
                 // 处理视频数据
-                Some(Ok((data, timestamp, _is_keyframe))) = video_stream.next() => {
+                Some(Ok(packet)) = video_stream.next() => {
                     let tag = FlvTag {
                         tag_type: FlvTagType::Video,
-                        timestamp,
-                        data,
+                        timestamp: packet.timestamp,
+                        data: packet.data,
                     };
 
                     match flv_muxer.mux_tag(&tag) {
                         Ok(flv_data) => {
                             debug!(target: "http_flv", 
-                                timestamp = timestamp,
+                                timestamp = packet.timestamp,
                                 size = flv_data.len(),
                                 "Video FLV tag sent"
                             );
@@ -109,17 +109,17 @@ fn create_flv_stream(
                 }
 
                 // 处理音频数据
-                Some(Ok((data, timestamp))) = audio_stream.next() => {
+                Some(Ok(packet)) = audio_stream.next() => {
                     let tag = FlvTag {
                         tag_type: FlvTagType::Audio,
-                        timestamp,
-                        data,
+                        timestamp: packet.timestamp,
+                        data: packet.data,
                     };
 
                     match flv_muxer.mux_tag(&tag) {
                         Ok(flv_data) => {
                             debug!(target: "http_flv", 
-                                timestamp = timestamp,
+                                timestamp = packet.timestamp,
                                 size = flv_data.len(),
                                 "Audio FLV tag sent"
                             );

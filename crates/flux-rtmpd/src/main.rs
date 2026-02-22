@@ -1,6 +1,10 @@
+mod auth;
 mod hls_manager;
+mod http_flv;
 mod media_processor;
+mod middleware;
 mod rtmp_server;
+mod rtmp_stream;
 mod stream_manager;
 mod telemetry;
 
@@ -8,9 +12,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
+use auth::login;
 use tracing::{error, info};
 use clap::Parser;
 use flux_media_core::{
@@ -56,6 +61,12 @@ struct AppState {
     rtmp_server: Option<Arc<RtmpServer>>,
     hls_manager: Arc<hls_manager::HlsManager>,
     stream_manager: Arc<stream_manager::StreamManager>,
+    unified_stream_manager: Arc<flux_stream::StreamManager>,
+    http_flv_server: Arc<http_flv::HttpFlvServer>,
+    // 安全组件
+    jwt_auth: Arc<flux_middleware::JwtAuth>,
+    rbac_manager: Arc<flux_middleware::RbacManager>,
+    rate_limiter: Arc<flux_middleware::RateLimiter>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,112 +207,36 @@ async fn hls_segment(
     Ok(resp)
 }
 
-async fn http_flv(
+async fn http_flv_route(
     State(state): State<AppState>,
-    Path(stream_id): Path<String>,
+    Path((app_name, stream_key)): Path<(String, String)>,
 ) -> std::result::Result<Response, StatusCode> {
-    use axum::body::Body;
-    use flux_media_core::playback::flv::{FlvMuxer, FlvTag, FlvTagType};
+    // 1. 记录客户端请求到统一流管理器
+    use flux_stream::{ClientInfo, ClientType, Protocol};
     
-    // 解析 stream_id: "rtmp/live/test123" -> app="live", key="test123"
-    let parts: Vec<&str> = stream_id.split('/').collect();
-    if parts.len() < 3 {
-        return Err(StatusCode::BAD_REQUEST);
+    let client_info = ClientInfo {
+        client_id: format!("flv-{}", uuid::Uuid::new_v4()),
+        client_type: ClientType::WebBrowser,
+        preferred_protocol: Protocol::HttpFlv,
+        bandwidth_estimate: None,
+        user_agent: None,
+    };
+    
+    let stream_id = flux_media_core::types::StreamId::new(
+        "rtmp", 
+        &format!("{}/{}", app_name, stream_key)
+    );
+    
+    // 请求输出流（会自动检测是否需要转码）
+    if let Err(e) = state.unified_stream_manager
+        .request_output(&stream_id, client_info).await 
+    {
+        tracing::warn!(target: "http_flv", "Failed to request output: {}", e);
     }
     
-    let app_name = parts[1];
-    let stream_key = parts[2];
-
-    // 从 StreamManager 订阅流
-    let (mut video_rx, mut audio_rx) = state.stream_manager
-        .subscribe(app_name, stream_key)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    info!(target: "http_flv", 
-        app = app_name, 
-        key = stream_key, 
-        "HTTP-FLV client connected"
-    );
-
-    // 创建 FLV 流
-    let stream = async_stream::stream! {
-        let mut flv_muxer = FlvMuxer::new();
-        
-        // 1. 发送 FLV Header
-        let header = flv_muxer.generate_header();
-        yield Ok::<_, std::io::Error>(header);
-
-        // 2. 循环接收并发送视频/音频数据
-        loop {
-            tokio::select! {
-                Ok(video_packet) = video_rx.recv() => {
-                    // 封装视频 Tag
-                    let tag = FlvTag {
-                        tag_type: FlvTagType::Video,
-                        timestamp: video_packet.timestamp,
-                        data: video_packet.data,
-                    };
-                    
-                    match flv_muxer.mux_tag(&tag) {
-                        Ok(flv_data) => {
-                            yield Ok(flv_data);
-                        }
-                        Err(e) => {
-                            error!(target: "http_flv", "Failed to mux video tag: {}", e);
-                            break;
-                        }
-                    }
-                }
-                Ok(audio_packet) = audio_rx.recv() => {
-                    // 封装音频 Tag
-                    let tag = FlvTag {
-                        tag_type: FlvTagType::Audio,
-                        timestamp: audio_packet.timestamp,
-                        data: audio_packet.data,
-                    };
-                    
-                    match flv_muxer.mux_tag(&tag) {
-                        Ok(flv_data) => {
-                            yield Ok(flv_data);
-                        }
-                        Err(e) => {
-                            error!(target: "http_flv", "Failed to mux audio tag: {}", e);
-                            break;
-                        }
-                    }
-                }
-                else => {
-                    // 所有通道都关闭，退出
-                    info!(target: "http_flv", "Stream ended");
-                    break;
-                }
-            }
-        }
-    };
-
-    // 创建响应
-    let body = Body::from_stream(stream);
-    
-    let mut resp = Response::new(body);
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("video/x-flv"),
-    );
-    resp.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
-    );
-    resp.headers_mut().insert(
-        axum::http::header::PRAGMA,
-        axum::http::HeaderValue::from_static("no-cache"),
-    );
-    resp.headers_mut().insert(
-        "Access-Control-Allow-Origin",
-        axum::http::HeaderValue::from_static("*"),
-    );
-
-    Ok(resp)
+    // 2. 调用 HttpFlvServer 处理
+    let stream_key_clean = stream_key.trim_end_matches(".flv");
+    state.http_flv_server.handle_stream(app_name, stream_key_clean.to_string()).await
 }
 
 #[tokio::main]
@@ -380,8 +315,13 @@ async fn main() -> anyhow::Result<()> {
         telemetry.clone(),
     ));
 
-    // 创建流管理器
+    // 创建 RTMP 流管理器（用于 broadcast channel）
     let stream_manager = Arc::new(stream_manager::StreamManager::new());
+
+    // 创建统一流管理器（协议无关）
+    use flux_config::StreamingConfig;
+    let streaming_config = StreamingConfig::default();
+    let unified_stream_manager = Arc::new(flux_stream::StreamManager::new(streaming_config));
 
     // 创建时移管理器
     use flux_media_core::timeshift::{TimeShiftCore, TimeShiftConfig};
@@ -393,12 +333,34 @@ async fn main() -> anyhow::Result<()> {
     
     // 创建 HLS 管理器（集成时移）
     let hls_dir = PathBuf::from("./data/hls");
-    let hls_manager = Arc::new(hls_manager::HlsManager::with_timeshift_and_storage(
+    let hls_manager = Arc::new(hls_manager::HlsManager::with_storage_manager(
         hls_dir,
+        storage_manager,
         Some(timeshift),
-        Some(storage_manager),
         telemetry.clone(),
     ));
+
+    // 创建 HTTP-FLV 服务器
+    let http_flv_server = Arc::new(http_flv::HttpFlvServer::new(stream_manager.clone()));
+
+    // 初始化安全组件
+    tracing::info!(target: "rtmpd", "Initializing security components");
+    
+    // JWT 认证（24小时过期）
+    let jwt_auth = Arc::new(flux_middleware::JwtAuth::new(
+        std::env::var("JWT_SECRET").unwrap_or_else(|_| "flux-iot-secret-change-in-production".to_string()),
+        24,
+    ));
+    
+    // RBAC 权限管理
+    let rbac_manager = Arc::new(flux_middleware::RbacManager::new());
+    
+    // 限流器配置
+    let rate_limiter = Arc::new(flux_middleware::RateLimiter::new(vec![
+        flux_middleware::RateLimitStrategy::by_ip(100, 60),      // 每分钟100个请求/IP
+        flux_middleware::RateLimitStrategy::global(10000, 60),   // 全局每分钟10000个请求
+        flux_middleware::RateLimitStrategy::by_resource(1000),   // 每个流最多1000个客户端
+    ]));
 
     // 启动 RTMP 服务器
     let rtmp_server = Arc::new(RtmpServer::new(
@@ -416,6 +378,11 @@ async fn main() -> anyhow::Result<()> {
         rtmp_server: Some(rtmp_server.clone()),
         hls_manager: hls_manager.clone(),
         stream_manager: stream_manager.clone(),
+        unified_stream_manager: unified_stream_manager.clone(),
+        http_flv_server,
+        jwt_auth,
+        rbac_manager,
+        rate_limiter,
     };
 
     let rtmp_task = rtmp_server.clone();
@@ -426,13 +393,45 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 启动 HTTP API 服务器
-    let app = Router::new()
+    tracing::info!(target: "rtmpd", "Setting up HTTP API with security middleware");
+    
+    // 公开路由（无需认证）
+    let public_routes = Router::new()
         .route("/health", get(health))
+        .route("/login", post(login));  // 登录接口
+    
+    // 受保护的 API 路由（需要认证和权限）
+    let protected_api = Router::new()
         .route("/api/v1/rtmp/streams", get(list_streams))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                middleware::require_permission("streams", "read")
+            ))
         .route("/api/v1/rtmp/streams/:stream_id/snapshot", get(snapshot))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                middleware::require_permission("streams", "read")
+            ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::jwt_auth_middleware
+        ));
+    
+    // 流媒体路由（限流保护）
+    let streaming_routes = Router::new()
         .route("/hls/:stream_id/index.m3u8", get(hls_playlist))
         .route("/hls/:stream_id/:segment", get(hls_segment))
-        .route("/flv/:stream_id.flv", get(http_flv))
+        .route("/flv/:app/:stream.flv", get(http_flv_route))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::rate_limit_middleware
+        ));
+    
+    // 合并所有路由
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_api)
+        .merge(streaming_routes)
         .with_state(state);
 
     let addr = args.http_bind;
