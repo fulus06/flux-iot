@@ -17,6 +17,9 @@ pub enum NotifierError {
     #[error("HTTP request failed: {0}")]
     HttpError(String),
 
+    #[error("Send failed: {0}")]
+    SendFailed(String),
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
@@ -147,49 +150,134 @@ impl Notifier for DingTalkNotifier {
     }
 }
 
-/// 邮件通知器（简化实现）
+/// 邮件通知器配置
+#[derive(Debug, Clone)]
+pub struct EmailConfig {
+    /// SMTP 服务器地址
+    pub smtp_server: String,
+    /// SMTP 端口
+    pub smtp_port: u16,
+    /// 发件人邮箱
+    pub from: String,
+    /// SMTP 用户名
+    pub username: String,
+    /// SMTP 密码
+    pub password: String,
+    /// 是否使用 TLS
+    pub use_tls: bool,
+}
+
+impl EmailConfig {
+    pub fn new(smtp_server: String, from: String, username: String, password: String) -> Self {
+        Self {
+            smtp_server,
+            smtp_port: 587, // 默认 STARTTLS 端口
+            from,
+            username,
+            password,
+            use_tls: true,
+        }
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.smtp_port = port;
+        self
+    }
+
+    pub fn without_tls(mut self) -> Self {
+        self.use_tls = false;
+        self
+    }
+}
+
+/// 邮件通知器（真实实现）
 pub struct EmailNotifier {
-    smtp_server: String,
-    from: String,
+    config: EmailConfig,
     to: Vec<String>,
 }
 
 impl EmailNotifier {
-    pub fn new(smtp_server: String, from: String, to: Vec<String>) -> Self {
-        Self {
-            smtp_server,
-            from,
-            to,
-        }
-    }
-
-    fn format_email(&self, alert: &Alert) -> String {
-        let mut body = format!("Alert: {}\n\n", alert.name);
-        body.push_str(&format!("Severity: {:?}\n", alert.severity));
-        body.push_str(&format!("State: {:?}\n", alert.state));
-        body.push_str(&format!("Message: {}\n\n", alert.message));
-        body.push_str(&format!("Fired at: {}\n", alert.fired_at));
-
-        if !alert.labels.is_empty() {
-            body.push_str("\nLabels:\n");
-            for (k, v) in &alert.labels {
-                body.push_str(&format!("  {}: {}\n", k, v));
-            }
-        }
-
-        body
+    pub fn new(config: EmailConfig, to: Vec<String>) -> Self {
+        Self { config, to }
     }
 }
 
 #[async_trait]
 impl Notifier for EmailNotifier {
     async fn send(&self, alert: &Alert) -> Result<(), NotifierError> {
-        // 简化实现：实际应该使用 lettre 或其他 SMTP 库
-        info!(
-            "Email notification would be sent to {:?}: {}",
-            self.to,
-            self.format_email(alert)
+        use lettre::{
+            Message, SmtpTransport, Transport,
+            transport::smtp::authentication::Credentials,
+        };
+
+        // 构建邮件内容
+        let subject = format!("[{:?}] {}", alert.severity, alert.name);
+        let mut body = format!(
+            "告警详情:\n\n\
+            名称: {}\n\
+            级别: {:?}\n\
+            状态: {:?}\n\
+            消息: {}\n\
+            触发时间: {}\n",
+            alert.name,
+            alert.severity,
+            alert.state,
+            alert.message,
+            alert.fired_at
         );
+
+        if !alert.labels.is_empty() {
+            body.push_str("\n标签:\n");
+            for (k, v) in &alert.labels {
+                body.push_str(&format!("  {}: {}\n", k, v));
+            }
+        }
+
+        // 发送给所有收件人
+        for recipient in &self.to {
+            // 构建邮件
+            let email = Message::builder()
+                .from(self.config.from.parse().map_err(|e| {
+                    NotifierError::SendFailed(format!("Invalid from address: {}", e))
+                })?)
+                .to(recipient.parse().map_err(|e| {
+                    NotifierError::SendFailed(format!("Invalid to address {}: {}", recipient, e))
+                })?)
+                .subject(&subject)
+                .body(body.clone())
+                .map_err(|e| NotifierError::SendFailed(format!("Failed to build email: {}", e)))?;
+
+            // 创建 SMTP 传输
+            let creds = Credentials::new(
+                self.config.username.clone(),
+                self.config.password.clone(),
+            );
+
+            let mailer = if self.config.use_tls {
+                SmtpTransport::starttls_relay(&self.config.smtp_server)
+                    .map_err(|e| NotifierError::SendFailed(format!("SMTP connection failed: {}", e)))?
+                    .port(self.config.smtp_port)
+                    .credentials(creds)
+                    .build()
+            } else {
+                SmtpTransport::builder_dangerous(&self.config.smtp_server)
+                    .port(self.config.smtp_port)
+                    .credentials(creds)
+                    .build()
+            };
+
+            // 发送邮件
+            mailer.send(&email).map_err(|e| {
+                NotifierError::SendFailed(format!("Failed to send email to {}: {}", recipient, e))
+            })?;
+
+            info!(
+                to = %recipient,
+                subject = %subject,
+                "Email notification sent successfully"
+            );
+        }
+
         Ok(())
     }
 

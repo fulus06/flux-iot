@@ -7,6 +7,7 @@ mod rtmp_server;
 mod rtmp_stream;
 mod stream_manager;
 mod telemetry;
+mod timeshift_api;
 
 use axum::{
     extract::{Path, State},
@@ -67,6 +68,8 @@ struct AppState {
     jwt_auth: Arc<flux_middleware::JwtAuth>,
     rbac_manager: Arc<flux_middleware::RbacManager>,
     rate_limiter: Arc<flux_middleware::RateLimiter>,
+    #[cfg(feature = "persistence")]
+    user_repository: Arc<flux_middleware::UserRepository>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +173,28 @@ async fn hls_playlist(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/vnd.apple.mpegurl"),
     );
+    Ok(resp)
+}
+
+async fn timeshift_playlist(
+    State(state): State<AppState>,
+    Path((app_name, stream_key)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<timeshift_api::TimeshiftQuery>,
+) -> std::result::Result<Response, StatusCode> {
+    let playlist = timeshift_api::TimeshiftApi::get_timeshift_playlist(
+        state.hls_manager.clone(),
+        app_name,
+        stream_key,
+        query,
+    )
+    .await?;
+
+    let mut resp = Response::new(playlist.into());
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/vnd.apple.mpegurl"),
+    );
+    
     Ok(resp)
 }
 
@@ -323,12 +348,20 @@ async fn main() -> anyhow::Result<()> {
     let streaming_config = StreamingConfig::default();
     let unified_stream_manager = Arc::new(flux_stream::StreamManager::new(streaming_config));
 
-    // 创建时移管理器
+    // 创建时移专用存储（使用 flux-storage）
+    use flux_storage::LocalSegmentStorage;
+    let timeshift_storage = Arc::new(LocalSegmentStorage::with_storage_manager(
+        storage_manager.clone(),
+        PathBuf::from("./data/timeshift"),
+    ));
+    
+    // 创建时移管理器（集成 flux-storage）
     use flux_media_core::timeshift::{TimeShiftCore, TimeShiftConfig};
     let timeshift_config = TimeShiftConfig::default();
-    let timeshift = Arc::new(TimeShiftCore::new(
+    let timeshift = Arc::new(TimeShiftCore::with_storage(
         timeshift_config,
-        PathBuf::from("./data/timeshift")
+        PathBuf::from("./data/timeshift"),
+        Some(timeshift_storage as Arc<dyn flux_storage::SegmentStorage>),
     ));
     
     // 创建 HLS 管理器（集成时移）
@@ -362,6 +395,31 @@ async fn main() -> anyhow::Result<()> {
         flux_middleware::RateLimitStrategy::by_resource(1000),   // 每个流最多1000个客户端
     ]));
 
+    // 初始化用户数据库（如果启用 persistence）
+    #[cfg(feature = "persistence")]
+    let user_repository = {
+        tracing::info!(target: "rtmpd", "Initializing user database");
+        
+        let db_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://flux:flux@localhost/flux_iot".to_string());
+        
+        let db = sea_orm::Database::connect(&db_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to database: {}", e))?;
+        
+        tracing::info!(target: "rtmpd", db_url = %db_url, "Database connected");
+        
+        // 注意：users 表应该已经在 PostgreSQL 迁移中创建
+        // 如果表不存在，请先运行: psql $DATABASE_URL -f migrations_sql/002_create_users_table.sql
+        tracing::info!(target: "rtmpd", "Database ready for UserRepository");
+        
+        // 创建 UserRepository
+        let repo = Arc::new(flux_middleware::UserRepository::new(Arc::new(db)));
+        tracing::info!(target: "rtmpd", "UserRepository initialized");
+        
+        repo
+    };
+
     // 启动 RTMP 服务器
     let rtmp_server = Arc::new(RtmpServer::new(
         args.rtmp_bind.clone(),
@@ -383,6 +441,8 @@ async fn main() -> anyhow::Result<()> {
         jwt_auth,
         rbac_manager,
         rate_limiter,
+        #[cfg(feature = "persistence")]
+        user_repository,
     };
 
     let rtmp_task = rtmp_server.clone();
@@ -421,6 +481,7 @@ async fn main() -> anyhow::Result<()> {
     let streaming_routes = Router::new()
         .route("/hls/:stream_id/index.m3u8", get(hls_playlist))
         .route("/hls/:stream_id/:segment", get(hls_segment))
+        .route("/hls/:app/:stream/timeshift.m3u8", get(timeshift_playlist))
         .route("/flv/:app/:stream.flv", get(http_flv_route))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

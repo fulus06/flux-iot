@@ -17,12 +17,306 @@ use flux_server::config::Gb28181Backend;
 use flux_server::gb28181_backend::{EmbeddedBackend, Gb28181BackendRef, RemoteBackend};
 use flux_storage::{DiskType, PoolConfig, StorageManager};
 use std::path::PathBuf;
+use flux_rule::RuleServices;
+use async_trait::async_trait;
+use flux_control::{CommandExecutor, CommandType, DeviceCommand};
+use flux_control::channel::MqttCommandChannel;
 
 mod api;
 mod auth;
 mod metrics;
 mod storage;
 mod worker;
+
+struct ServerRuleServices {
+    event_bus: Arc<EventBus>,
+    db: sea_orm::DatabaseConnection,
+    command_executor: Arc<CommandExecutor>,
+    webhook_url: Option<String>,
+    http_client: reqwest::Client,
+}
+
+impl ServerRuleServices {
+    fn publish_json(&self, topic: String, payload: serde_json::Value) {
+        let msg = flux_types::message::Message::new(topic, payload);
+        if let Err(e) = self.event_bus.publish(msg) {
+            tracing::warn!(error = %e, "Failed to publish rule action event");
+        }
+    }
+
+    async fn post_webhook(&self, payload: serde_json::Value) -> anyhow::Result<()> {
+        let Some(url) = self.webhook_url.as_ref() else {
+            return Ok(());
+        };
+
+        let resp = self
+            .http_client
+            .post(url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Webhook returned non-success status: {}",
+                resp.status()
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn parse_time_range_to_ms(time_range: &str) -> Option<i64> {
+        let trimmed = time_range.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let (num_part, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+        let value: i64 = match num_part.parse() {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+
+        let mult = match unit {
+            "s" | "S" => 1_000,
+            "m" | "M" => 60_000,
+            "h" | "H" => 3_600_000,
+            "d" | "D" => 86_400_000,
+            _ => return None,
+        };
+
+        Some(value.saturating_mul(mult))
+    }
+}
+
+#[async_trait]
+impl RuleServices for ServerRuleServices {
+    async fn control_device(
+        &self,
+        device_id: &str,
+        command: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let cmd = DeviceCommand::new(
+            device_id.to_string(),
+            CommandType::Custom {
+                name: command.to_string(),
+                params: params.clone(),
+            },
+        );
+
+        let _command_id = self.command_executor.submit(cmd.clone()).await?;
+
+        let exec = self.command_executor.clone();
+        tokio::spawn(async move {
+            if let Err(e) = exec.execute(cmd).await {
+                tracing::warn!(error = %e, "Rule control_device execution failed");
+            }
+        });
+
+        self.publish_json(
+            format!("rule/control/{}", device_id),
+            serde_json::json!({"device_id": device_id, "command": command, "params": params}),
+        );
+        Ok(())
+    }
+
+    async fn read_device(&self, device_id: &str, metric: &str) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({"device_id": device_id, "metric": metric, "value": null}))
+    }
+
+    async fn update_device_status(&self, device_id: &str, status: &str) -> anyhow::Result<()> {
+        self.publish_json(
+            format!("rule/device/{}/status", device_id),
+            serde_json::json!({"device_id": device_id, "status": status}),
+        );
+        Ok(())
+    }
+
+    async fn send_notification(&self, channel: &str, title: &str, message: &str) -> anyhow::Result<()> {
+        let webhook_payload = serde_json::json!({
+            "type": "notification",
+            "channel": channel,
+            "title": title,
+            "message": message,
+            "timestamp_ms": chrono::Utc::now().timestamp_millis(),
+        });
+
+        if let Err(e) = self.post_webhook(webhook_payload).await {
+            tracing::warn!(error = %e, "Webhook notification failed");
+        }
+
+        self.publish_json(
+            format!("rule/notify/{}", channel),
+            serde_json::json!({"channel": channel, "title": title, "message": message}),
+        );
+        Ok(())
+    }
+
+    async fn send_email(&self, params: serde_json::Value) -> anyhow::Result<()> {
+        let webhook_payload = serde_json::json!({
+            "type": "email",
+            "params": params,
+            "timestamp_ms": chrono::Utc::now().timestamp_millis(),
+        });
+
+        if let Err(e) = self.post_webhook(webhook_payload).await {
+            tracing::warn!(error = %e, "Webhook email failed");
+        }
+
+        self.publish_json("rule/notify/email".to_string(), params);
+        Ok(())
+    }
+
+    async fn send_sms(&self, phone: &str, message: &str) -> anyhow::Result<()> {
+        let webhook_payload = serde_json::json!({
+            "type": "sms",
+            "phone": phone,
+            "message": message,
+            "timestamp_ms": chrono::Utc::now().timestamp_millis(),
+        });
+
+        if let Err(e) = self.post_webhook(webhook_payload).await {
+            tracing::warn!(error = %e, "Webhook sms failed");
+        }
+
+        self.publish_json(
+            "rule/notify/sms".to_string(),
+            serde_json::json!({"phone": phone, "message": message}),
+        );
+        Ok(())
+    }
+
+    async fn send_push(&self, user_id: &str, title: &str, message: &str) -> anyhow::Result<()> {
+        let webhook_payload = serde_json::json!({
+            "type": "push",
+            "user_id": user_id,
+            "title": title,
+            "message": message,
+            "timestamp_ms": chrono::Utc::now().timestamp_millis(),
+        });
+
+        if let Err(e) = self.post_webhook(webhook_payload).await {
+            tracing::warn!(error = %e, "Webhook push failed");
+        }
+
+        self.publish_json(
+            "rule/notify/push".to_string(),
+            serde_json::json!({"user_id": user_id, "title": title, "message": message}),
+        );
+        Ok(())
+    }
+
+    async fn query_metrics(&self, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        use flux_core::entity::events;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let topic = params
+            .get("topic")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if topic.is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+
+        let window_ms = params
+            .get("window_ms")
+            .and_then(|v| v.as_i64())
+            .or_else(|| {
+                params
+                    .get("time_range")
+                    .and_then(|v| v.as_str())
+                    .and_then(Self::parse_time_range_to_ms)
+            })
+            .unwrap_or(3_600_000);
+
+        let cutoff = chrono::Utc::now().timestamp_millis().saturating_sub(window_ms);
+
+        let rows = events::Entity::find()
+            .filter(events::Column::Topic.eq(topic.to_string()))
+            .filter(events::Column::Timestamp.gte(cutoff))
+            .all(&self.db)
+            .await?;
+
+        let field = params
+            .get("field")
+            .and_then(|v| v.as_str())
+            .unwrap_or("value");
+
+        let mut vals: Vec<f64> = Vec::new();
+        for row in rows {
+            let payload: serde_json::Value = row.payload;
+            if let Some(v) = payload.get(field).and_then(|vv| vv.as_f64()) {
+                vals.push(v);
+            }
+        }
+
+        if vals.is_empty() {
+            return Ok(serde_json::json!({"total": 0.0, "average": 0.0, "peak": 0.0}));
+        }
+
+        let total: f64 = vals.iter().sum();
+        let average = total / (vals.len() as f64);
+        let peak = vals
+            .into_iter()
+            .fold(f64::MIN, |acc, x| if x > acc { x } else { acc });
+
+        Ok(serde_json::json!({"total": total, "average": average, "peak": peak}))
+    }
+
+    async fn count_events(&self, event_type: &str, time_range: &str) -> anyhow::Result<i64> {
+        use flux_core::entity::events;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let window_ms = Self::parse_time_range_to_ms(time_range).unwrap_or(3_600_000);
+        let cutoff = chrono::Utc::now().timestamp_millis().saturating_sub(window_ms);
+
+        let count = events::Entity::find()
+            .filter(events::Column::Topic.eq(event_type.to_string()))
+            .filter(events::Column::Timestamp.gte(cutoff))
+            .count(&self.db)
+            .await?;
+
+        Ok(count as i64)
+    }
+
+    async fn record_event(&self, event_type: &str, data: serde_json::Value) -> anyhow::Result<()> {
+        use flux_core::entity::events;
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let model = events::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            topic: Set(event_type.to_string()),
+            payload: Set(data),
+            timestamp: Set(chrono::Utc::now().timestamp_millis()),
+        };
+
+        let _ = model.insert(&self.db).await?;
+        Ok(())
+    }
+
+    async fn create_ticket(&self, params: serde_json::Value) -> anyhow::Result<()> {
+        self.publish_json("rule/ticket/create".to_string(), params);
+        Ok(())
+    }
+
+    async fn update_ticket(&self, ticket_id: &str, params: serde_json::Value) -> anyhow::Result<()> {
+        self.publish_json(
+            format!("rule/ticket/{}/update", ticket_id),
+            params,
+        );
+        Ok(())
+    }
+
+    async fn close_ticket(&self, ticket_id: &str) -> anyhow::Result<()> {
+        self.publish_json(
+            format!("rule/ticket/{}/close", ticket_id),
+            serde_json::json!({"ticket_id": ticket_id}),
+        );
+        Ok(())
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -74,7 +368,7 @@ async fn main() -> anyhow::Result<()> {
             || config_source.eq_ignore_ascii_case("db")
             || config_source.eq_ignore_ascii_case("test")
         {
-            "sqlite://flux.db?mode=rwc".to_string()
+            "postgresql://flux:flux@localhost/flux_iot".to_string()
         } else if config_source.eq_ignore_ascii_case("postgres")
             || config_source.eq_ignore_ascii_case("prod")
         {
@@ -111,7 +405,27 @@ async fn main() -> anyhow::Result<()> {
     // 2. Initialize Core Components
     let event_bus = Arc::new(EventBus::new(app_config.eventbus.capacity));
     let plugin_manager = Arc::new(PluginManager::new()?);
-    let script_engine = Arc::new(ScriptEngine::new());
+
+    let webhook_url = app_config.rule.webhook_url.clone();
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    let mqtt_channel = MqttCommandChannel::new("127.0.0.1", 1883, "flux_rule_executor").await?;
+    let command_channel: Arc<dyn flux_control::CommandChannel> = Arc::new(mqtt_channel);
+    let command_executor = Arc::new(CommandExecutor::new(command_channel));
+
+    let services = Arc::new(ServerRuleServices {
+        event_bus: event_bus.clone(),
+        db: db.clone(),
+        command_executor,
+        webhook_url,
+        http_client,
+    });
+
+    let mut script_engine_inner = ScriptEngine::new();
+    flux_rule::functions::register_builtin_functions_with_services(&mut script_engine_inner, services);
+    let script_engine = Arc::new(script_engine_inner);
 
     // 2.1 Initialize StorageManager (multi-pool from ./config)
     let storage_manager = Arc::new(StorageManager::new());
@@ -200,35 +514,37 @@ async fn main() -> anyhow::Result<()> {
         rule.insert(&db).await?;
     }
 
-    // Load Plugins
-    // TODO: move to a proper loader service
-    let plugin_dir = &app_config.plugins.directory;
-    tracing::info!("Loading plugins from: {}", plugin_dir);
-
-    if let Ok(entries) = std::fs::read_dir(plugin_dir) {
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "wasm") {
-                tracing::info!("Found plugin: {:?}", path);
-                if let Ok(bytes) = std::fs::read(&path) {
-                    let filename = match path.file_stem() {
-                        Some(name) => name.to_string_lossy(),
-                        None => {
-                            tracing::warn!("Invalid plugin filename: {:?}", path);
-                            continue;
-                        }
-                    };
-                    // Load the plugin
-                    if let Err(e) = plugin_manager.load_plugin(&filename, &bytes) {
-                        tracing::error!("Failed to load plugin {}: {:?}", filename, e);
-                    } else {
-                        tracing::info!("Successfully loaded plugin: {}", filename);
-                    }
-                }
+    // Load Plugins using PluginLoader service
+    let plugin_loader = flux_server::plugin_loader::PluginLoader::new(
+        &app_config.plugins.directory,
+        plugin_manager.clone(),
+    );
+    
+    match plugin_loader.load_all().await {
+        Ok(result) => {
+            tracing::info!(
+                total = result.total,
+                loaded = result.loaded,
+                failed = result.failed.len(),
+                success_rate = format!("{:.1}%", result.success_rate() * 100.0),
+                "Plugin loading completed"
+            );
+            
+            // 记录加载失败的插件
+            for error in &result.failed {
+                tracing::error!(
+                    path = %error.path.display(),
+                    error = %error.error,
+                    "Plugin load failed"
+                );
             }
+            
+            // 更新 metrics
+            flux_server::metrics::set_loaded_plugins(result.loaded);
         }
-    } else {
-        tracing::warn!("Plugin directory not found: {}", plugin_dir);
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to load plugins");
+        }
     }
 
     // Prepare optional GB28181 backend (embedded or remote)

@@ -17,3 +17,31 @@ workers = 2
 
 [logging]
 level = "info"
+
+[rule]
+# webhook_url = "http://localhost:8080/webhook/notifications"
+
+[storage]
+# 基础存储路径（所有模块共用）
+# 默认：/var/lib/flux-iot
+base_path = "/var/lib/flux-iot"
+
+# S3 存储配置（可选，启用后所有模块可共用）
+# [storage.s3]
+# bucket = "flux-iot"
+# region = "us-east-1"
+# prefix = "data"
+# # MinIO 配置示例
+# # endpoint = "http://localhost:9000"
+# # access_key_id = "minioadmin"
+# # secret_access_key = "minioadmin"
+
+[timescale]
+# 归档保留天数（默认：30 天后归档）
+archive_retention_days = 30
+
+# 是否在归档后删除原始数据（默认：false）
+delete_after_archive = false
+
+# 是否使用 S3 归档（使用 storage.s3 配置）
+use_s3_archive = false

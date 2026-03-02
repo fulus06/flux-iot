@@ -17,7 +17,7 @@ chrono = "0.4"
 clap = { version = "4.4", features = ["derive"] }
 flux-config = { path = "../flux-config" }
 flux-media-core = { path = "../flux-media-core" }
-flux-middleware = { path = "../flux-middleware" }
+flux-middleware = { path = "../flux-middleware", features = ["persistence"] }
 flux-storage = { path = "../flux-storage" }
 flux-stream = { path = "../flux-stream" }
 futures = "0.3"
@@ -30,8 +30,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 uuid = { version = "1.0", features = ["v4"] }
+bcrypt = "0.15"
+sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tower = "0.4"
 hyper = "0.14"
+
+[features]
+default = []
+persistence = ["sea-orm"]

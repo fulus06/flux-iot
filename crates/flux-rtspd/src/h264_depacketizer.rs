@@ -53,8 +53,10 @@ impl H264Depacketizer {
                 }
             }
             29 => {
-                // FU-B (分片 NALU with DON)
-                warn!(target: "h264_depacketizer", "FU-B not implemented");
+                // FU-B (分片 NALU with DON - Decoding Order Number)
+                if let Some(nalu) = self.process_fu_b(&packet)? {
+                    nalus.push(nalu);
+                }
             }
             _ => {
                 warn!(target: "h264_depacketizer", "Unknown NAL type: {}", nal_type);
@@ -150,6 +152,94 @@ impl H264Depacketizer {
         for packet in &self.buffer {
             if packet.payload.len() > 2 {
                 data.extend_from_slice(&packet.payload[2..]); // Skip FU indicator and header
+            }
+        }
+        
+        let is_keyframe = nal_type == 5; // IDR frame
+        
+        Ok(H264Nalu {
+            timestamp: self.last_timestamp,
+            data: data.freeze(),
+            is_keyframe,
+        })
+    }
+
+    /// 处理 FU-B (Fragmentation Unit type B with DON)
+    /// FU-B 与 FU-A 类似，但包含 DON (Decoding Order Number) 字段
+    /// 
+    /// FU-B 格式:
+    /// +---------------+
+    /// |0|1|2|3|4|5|6|7|
+    /// +-+-+-+-+-+-+-+-+
+    /// |F|NRI|  Type   | FU indicator (Type = 29)
+    /// +---------------+
+    /// |S|E|R|  Type   | FU header
+    /// +---------------+
+    /// |  DON (16 bit) | Decoding Order Number
+    /// +---------------+
+    /// |               |
+    /// |   FU payload  |
+    /// |               |
+    /// +---------------+
+    fn process_fu_b(&mut self, packet: &RtpPacket) -> Result<Option<H264Nalu>> {
+        if packet.payload.len() < 4 {
+            // FU-B 至少需要 4 字节: FU indicator + FU header + DON (2 bytes)
+            return Ok(None);
+        }
+        
+        let fu_indicator = packet.payload[0];
+        let fu_header = packet.payload[1];
+        let don = u16::from_be_bytes([packet.payload[2], packet.payload[3]]);
+        
+        let start_bit = (fu_header & 0x80) != 0;
+        let end_bit = (fu_header & 0x40) != 0;
+        let nal_type = fu_header & 0x1F;
+        
+        debug!(
+            target: "h264_depacketizer",
+            "FU-B: S={}, E={}, Type={}, DON={}",
+            start_bit, end_bit, nal_type, don
+        );
+        
+        if start_bit {
+            // 开始新的分片序列
+            self.buffer.clear();
+            self.last_timestamp = packet.timestamp;
+        }
+        
+        // 检查时间戳是否匹配
+        if packet.timestamp != self.last_timestamp {
+            warn!(target: "h264_depacketizer", "Timestamp mismatch in FU-B");
+            self.buffer.clear();
+            return Ok(None);
+        }
+        
+        // 添加到缓冲区
+        self.buffer.push_back(packet.clone());
+        
+        if end_bit {
+            // 组装完整的 NALU
+            let nalu = self.assemble_fu_b(nal_type, fu_indicator)?;
+            self.buffer.clear();
+            return Ok(Some(nalu));
+        }
+        
+        Ok(None)
+    }
+
+    /// 组装 FU-B 分片
+    fn assemble_fu_b(&self, nal_type: u8, fu_indicator: u8) -> Result<H264Nalu> {
+        let mut data = BytesMut::new();
+        
+        // 重建 NAL header
+        let nal_header = (fu_indicator & 0xE0) | nal_type;
+        data.extend_from_slice(&[nal_header]);
+        
+        // 组装所有分片的 payload
+        for packet in &self.buffer {
+            if packet.payload.len() > 4 {
+                // Skip FU indicator (1) + FU header (1) + DON (2) = 4 bytes
+                data.extend_from_slice(&packet.payload[4..]);
             }
         }
         

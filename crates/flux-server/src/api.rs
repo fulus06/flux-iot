@@ -913,7 +913,7 @@ pub async fn get_app_config_audit(
     (StatusCode::OK, Json(serde_json::json!({ "items": items })))
 }
 
-fn check_reload_policy(old_cfg: &flux_server::AppConfig, new_cfg: &flux_server::AppConfig) -> Option<Vec<&'static str>> {
+fn check_reload_policy(old_cfg: &crate::AppConfig, new_cfg: &crate::AppConfig) -> Option<Vec<&'static str>> {
     let mut blocked: Vec<&'static str> = Vec::new();
 
     if old_cfg.server.host != new_cfg.server.host {
@@ -1335,7 +1335,7 @@ pub async fn update_app_config(
         }
     };
 
-    let new_cfg: flux_server::AppConfig = match settings.try_deserialize() {
+    let new_cfg: crate::AppConfig = match settings.try_deserialize() {
         Ok(v) => v,
         Err(e) => {
             return (

@@ -16,7 +16,8 @@ thiserror = "1.0"
 tracing = "0.1"
 async-trait = "0.1"
 rhai = { version = "1.16", features = ["serde", "sync"] }
-sea-orm = { version = "0.12", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros"], optional = true }
+tokio-cron-scheduler = "0.10"
+sea-orm = { version = "0.12", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"], optional = true }
 rumqttc = { version = "0.24", optional = true }
 
 # Workspace dependencies

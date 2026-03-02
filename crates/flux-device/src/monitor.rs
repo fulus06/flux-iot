@@ -1,6 +1,7 @@
 use crate::{Device, DeviceError, DeviceMetrics, DeviceRegistry, DeviceStatus, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::interval;
@@ -24,6 +25,9 @@ pub struct DeviceMonitor {
     
     /// 是否正在运行
     running: Arc<RwLock<bool>>,
+    
+    /// 在线设备数量缓存（避免每次遍历）
+    online_count: Arc<AtomicUsize>,
 }
 
 impl DeviceMonitor {
@@ -44,6 +48,7 @@ impl DeviceMonitor {
             timeout: Duration::from_secs(timeout),
             last_heartbeat: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(RwLock::new(false)),
+            online_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -167,10 +172,28 @@ impl DeviceMonitor {
                 d.set_status(status.clone());
                 self.registry.update(device_id, d).await?;
                 
+                match (&old_status, &status) {
+                    (DeviceStatus::Online, DeviceStatus::Online) => {
+                        // 状态未变，无需更新计数
+                    }
+                    (DeviceStatus::Online, _) => {
+                        // 从在线变为其他状态，计数减1
+                        self.online_count.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    (_, DeviceStatus::Online) => {
+                        // 从其他状态变为在线，计数加1
+                        self.online_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {
+                        // 两个都不是在线状态，无需更新计数
+                    }
+                }
+                
                 info!(
                     device_id = %device_id,
                     old_status = ?old_status,
                     new_status = ?status,
+                    online_count = self.online_count.load(Ordering::Relaxed),
                     "Device status changed"
                 );
                 Ok(())
@@ -273,14 +296,9 @@ impl DeviceMonitor {
         Ok(status == DeviceStatus::Online)
     }
 
-    /// 获取在线设备数量
+    /// 获取在线设备数量（使用缓存计数器，O(1) 时间复杂度）
     pub async fn online_count(&self) -> Result<u64> {
-        // TODO: 优化查询
-        let filter = crate::DeviceFilter {
-            status: Some(DeviceStatus::Online),
-            ..Default::default()
-        };
-        self.registry.count(filter).await
+        Ok(self.online_count.load(Ordering::Relaxed) as u64)
     }
 
     /// 获取离线设备数量

@@ -5,7 +5,7 @@ use bytes::Bytes;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 use tokio::fs;
 use tracing::{debug, error};
 
@@ -31,6 +31,9 @@ struct LocalBackendStats {
     delete_count: AtomicU64,
     bytes_read: AtomicU64,
     bytes_written: AtomicU64,
+    // 延迟统计（使用原子操作存储微秒数）
+    total_read_latency_us: AtomicU64,
+    total_write_latency_us: AtomicU64,
 }
 
 impl LocalBackend {
@@ -44,6 +47,8 @@ impl LocalBackend {
                 delete_count: AtomicU64::new(0),
                 bytes_read: AtomicU64::new(0),
                 bytes_written: AtomicU64::new(0),
+                total_read_latency_us: AtomicU64::new(0),
+                total_write_latency_us: AtomicU64::new(0),
             }),
         }
     }
@@ -69,6 +74,7 @@ impl LocalBackend {
 #[async_trait]
 impl StorageBackend for LocalBackend {
     async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
+        let start = Instant::now();
         let full_path = self.resolve_path(path);
         
         // 确保父目录存在
@@ -78,13 +84,17 @@ impl StorageBackend for LocalBackend {
         // 性能优化：使用 write_all 一次性写入
         match fs::write(&full_path, data).await {
             Ok(_) => {
+                let elapsed = start.elapsed();
+                
                 // 更新统计
                 self.stats.write_count.fetch_add(1, Ordering::Relaxed);
                 self.stats.bytes_written.fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.stats.total_write_latency_us.fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
                 
                 debug!(
                     path = %path,
                     size = data.len(),
+                    latency_ms = elapsed.as_millis(),
                     "File written to local storage"
                 );
                 Ok(())
@@ -120,21 +130,24 @@ impl StorageBackend for LocalBackend {
     }
     
     async fn read(&self, path: &str) -> Result<Bytes> {
+        let start = Instant::now();
         let full_path = self.resolve_path(path);
         
         // 异步读取文件
         // 性能优化：直接读取为 Vec<u8>，然后转换为 Bytes（零拷贝）
         match fs::read(&full_path).await {
             Ok(data) => {
-                let size = data.len();
+                let elapsed = start.elapsed();
                 
                 // 更新统计
                 self.stats.read_count.fetch_add(1, Ordering::Relaxed);
-                self.stats.bytes_read.fetch_add(size as u64, Ordering::Relaxed);
+                self.stats.bytes_read.fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.stats.total_read_latency_us.fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
                 
                 debug!(
                     path = %path,
-                    size = size,
+                    size = data.len(),
+                    latency_ms = elapsed.as_millis(),
                     "File read from local storage"
                 );
                 
@@ -253,14 +266,32 @@ impl StorageBackend for LocalBackend {
     }
     
     async fn stats(&self) -> BackendStats {
+        let read_count = self.stats.read_count.load(Ordering::Relaxed);
+        let write_count = self.stats.write_count.load(Ordering::Relaxed);
+        let total_read_latency_us = self.stats.total_read_latency_us.load(Ordering::Relaxed);
+        let total_write_latency_us = self.stats.total_write_latency_us.load(Ordering::Relaxed);
+        
+        // 计算平均延迟（微秒转毫秒）
+        let avg_read_latency_ms = if read_count > 0 {
+            (total_read_latency_us as f64 / read_count as f64) / 1000.0
+        } else {
+            0.0
+        };
+        
+        let avg_write_latency_ms = if write_count > 0 {
+            (total_write_latency_us as f64 / write_count as f64) / 1000.0
+        } else {
+            0.0
+        };
+        
         BackendStats {
-            read_count: self.stats.read_count.load(Ordering::Relaxed),
-            write_count: self.stats.write_count.load(Ordering::Relaxed),
+            read_count,
+            write_count,
             delete_count: self.stats.delete_count.load(Ordering::Relaxed),
             bytes_read: self.stats.bytes_read.load(Ordering::Relaxed),
             bytes_written: self.stats.bytes_written.load(Ordering::Relaxed),
-            avg_read_latency_ms: 0.0,  // TODO: 实现延迟统计
-            avg_write_latency_ms: 0.0,
+            avg_read_latency_ms,
+            avg_write_latency_ms,
             cache_hit_rate: 0.0,
         }
     }

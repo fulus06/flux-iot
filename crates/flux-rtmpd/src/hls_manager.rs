@@ -74,6 +74,11 @@ impl HlsManager {
             telemetry,
         }
     }
+    
+    /// 获取 segment_storage（用于时移回放查询）
+    pub fn get_segment_storage(&self) -> &Arc<dyn SegmentStorage> {
+        &self.segment_storage
+    }
 
     /// 注册流（开始 HLS 转换）
     pub async fn register_stream(
@@ -207,11 +212,27 @@ impl HlsManager {
             ts_data.extend_from_slice(packet);
         }
 
-        // 使用 SegmentStorage trait 保存分片
+        // 计算分片开始时间
+        let segment_start_time = Utc::now() - Duration::milliseconds((duration * 1000.0) as i64);
+        
+        // 构造元数据（用于时移回放）
+        let mut metadata = flux_storage::SegmentMetadata::new();
+        metadata
+            .set("protocol", "hls")
+            .set("format", "ts")
+            .set("start_time", segment_start_time.to_rfc3339())
+            .set("duration", duration.to_string())
+            .set("size", total_size.to_string())
+            .set("has_keyframe", "true")
+            .set("codec", "h264")
+            .set("sequence", segment_info.sequence.to_string());
+        
+        // 使用 SegmentStorage trait 保存分片（带元数据）
         match self.segment_storage
-            .save_segment(
+            .save_segment_with_metadata(
                 context.stream_id.as_str(),
                 segment_info.sequence,
+                metadata,
                 &ts_data,
             )
             .await
@@ -222,7 +243,8 @@ impl HlsManager {
                     filename = %filename,
                     duration = duration,
                     size = total_size,
-                    "HLS segment saved"
+                    start_time = %segment_start_time,
+                    "HLS segment saved with metadata"
                 );
 
                 if self.telemetry.enabled() {
@@ -236,24 +258,24 @@ impl HlsManager {
                                 "filename": filename,
                                 "bytes": total_size,
                                 "duration": duration,
+                                "start_time": segment_start_time.to_rfc3339(),
                             }),
                             50,
                         )
                         .await;
                 }
 
-                // 添加到时移管理器
+                // 添加到时移管理器（保持兼容性）
                 if let Some(ref timeshift) = self.timeshift {
                     let ts_segment = Segment {
                         sequence: segment_info.sequence,
-                        start_time: Utc::now()
-                            - Duration::milliseconds((duration * 1000.0) as i64),
+                        start_time: segment_start_time,
                         duration,
                         data: Bytes::from(ts_data),
                         metadata: SegmentMetadata {
                             format: SegmentFormat::Ts,
                             has_keyframe: true,
-                            file_path: None, // 由 SegmentStorage 管理路径
+                            file_path: None,
                             size: total_size as u64,
                         },
                     };
@@ -378,14 +400,28 @@ impl HlsManager {
         let key = format!("{}/{}", app_name, stream_key);
         let generators = self.generators.read().await;
 
-        if let Some(_context) = generators.get(&key) {
-            // TODO: 实现音频 TS 封装
-            // 目前只处理视频，音频暂时忽略
+        if let Some(context) = generators.get(&key) {
+            // 将时间戳转换为 PTS (90kHz)
+            let pts = (timestamp as u64) * 90;
+
+            // 使用 TsMuxer 封装音频 PES
+            let mut ts_muxer = context.ts_muxer.write().await;
+            let ts_packets = ts_muxer.mux_audio_pes(data, pts)
+                .map_err(|e| anyhow::anyhow!("Failed to mux audio PES: {}", e))?;
+
+            // 添加到当前分片
+            let mut segment = context.current_segment.write().await;
+            for packet in ts_packets {
+                segment.data.push(packet);
+            }
+
             debug!(target: "hls_manager", 
                 stream_key = %key,
                 size = data.len(),
                 timestamp = timestamp,
-                "Audio data received (not yet processed)"
+                pts = pts,
+                packets = segment.data.len(),
+                "Audio data processed and added to segment"
             );
         }
 

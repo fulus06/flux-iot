@@ -14,22 +14,28 @@ async-trait = "0.1"
 flux-core = { path = "../flux-core" }
 flux-plugin = { path = "../flux-plugin" }
 flux-script = { path = "../flux-script" }
+flux-rule = { path = "../flux-rule" }
+flux-control = { path = "../flux-control", features = ["mqtt"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 config = "0.13"
 anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
 hex = "0.4"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
-sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
+sea-orm = { version = "0.12", features = [ "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
 flux-types = { version = "0.1.0", path = "../flux-types" }
 flux-mqtt = { path = "../flux-mqtt" }
 flux-video = { path = "../flux-video" }
 
 flux-storage = { path = "../flux-storage" }
 flux-config = { path = "../flux-config" }
+
+# File watching for plugin hot reload
+notify = "6.0"
 
 # Metrics and observability
 metrics = "0.21"

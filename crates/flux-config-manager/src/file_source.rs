@@ -1,11 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::SystemTime;
 use tokio::fs;
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tokio::time::Duration;
+use tracing::{debug, error, warn};
 
 use crate::source::{ConfigSource, ConfigWatcher};
 
@@ -63,37 +64,38 @@ where
         let (tx, rx) = mpsc::channel(10);
         let path = self.path.clone();
 
-        std::thread::spawn(move || {
-            let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-
-            let mut watcher: RecommendedWatcher =
-                Watcher::new(notify_tx, notify::Config::default()).unwrap();
-
-            watcher
-                .watch(&path, RecursiveMode::NonRecursive)
-                .unwrap();
-
-            debug!("File watcher started for: {:?}", path);
+        tokio::spawn(async move {
+            let mut last_modified: Option<SystemTime> = None;
+            let mut interval = tokio::time::interval(Duration::from_millis(200));
 
             loop {
-                match notify_rx.recv() {
-                    Ok(Ok(Event { kind, .. })) => {
-                        use notify::EventKind::*;
-                        match kind {
-                            Modify(_) | Create(_) => {
-                                debug!("Config file changed: {:?}", path);
-                                if tx.blocking_send(()).is_err() {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        error!("Watch error: {}", e);
-                    }
+                interval.tick().await;
+
+                let metadata = match tokio::fs::metadata(&path).await {
+                    Ok(m) => m,
                     Err(e) => {
-                        error!("Channel error: {}", e);
+                        warn!(error = %e, path = ?path, "Failed to stat config file");
+                        continue;
+                    }
+                };
+
+                let modified = match metadata.modified() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(error = %e, path = ?path, "Failed to read modified time");
+                        continue;
+                    }
+                };
+
+                let changed = match last_modified {
+                    Some(last) => modified > last,
+                    None => true,
+                };
+
+                if changed {
+                    last_modified = Some(modified);
+                    debug!(path = ?path, "Config file changed (polling watcher)");
+                    if tx.send(()).await.is_err() {
                         break;
                     }
                 }

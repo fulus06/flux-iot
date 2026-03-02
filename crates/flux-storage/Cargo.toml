@@ -18,6 +18,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1.5"
 chrono = { version = "0.4", features = ["serde"] }
+dashmap = "5.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -26,7 +27,14 @@ tokio = { version = "1.35", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
+# PostgreSQL 元数据存储（可选）
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "json"], optional = true }
+
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+# S3/MinIO support (optional)
+aws-config = { version = "1.1", optional = true }
+aws-sdk-s3 = { version = "1.15", optional = true }
 
 # 磁盘监控
 sysinfo = "0.30"
@@ -45,3 +53,5 @@ tokio-test = "0.4"
 [features]
 default = []
 monitor = ["flux-notify", "tracing-subscriber", "reqwest"]
+s3 = ["aws-config", "aws-sdk-s3"]
+postgres = ["sqlx"]

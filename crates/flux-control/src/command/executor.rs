@@ -1,4 +1,4 @@
-use super::model::{DeviceCommand, CommandStatus};
+use super::model::{DeviceCommand, CommandStatus, CommandType};
 use super::queue::CommandQueue;
 use crate::channel::CommandChannel;
 use crate::response::ResponseHandler;
@@ -7,6 +7,9 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
+
+#[cfg(feature = "persistence")]
+use crate::db::CommandRepository;
 
 /// 指令执行器
 pub struct CommandExecutor {
@@ -19,6 +22,10 @@ pub struct CommandExecutor {
     /// 响应处理器
     response_handler: Option<Arc<dyn ResponseHandler>>,
     
+    /// 数据库仓库（可选）
+    #[cfg(feature = "persistence")]
+    repository: Option<Arc<CommandRepository>>,
+    
     /// 是否正在运行
     running: Arc<RwLock<bool>>,
 }
@@ -29,6 +36,8 @@ impl CommandExecutor {
             queue: CommandQueue::new(),
             channel,
             response_handler: None,
+            #[cfg(feature = "persistence")]
+            repository: None,
             running: Arc::new(RwLock::new(false)),
         }
     }
@@ -42,11 +51,25 @@ impl CommandExecutor {
         self.response_handler = Some(handler);
         self
     }
+    
+    #[cfg(feature = "persistence")]
+    pub fn with_repository(mut self, repository: Arc<CommandRepository>) -> Self {
+        self.repository = Some(repository);
+        self
+    }
 
     /// 提交指令
     pub async fn submit(&self, command: DeviceCommand) -> anyhow::Result<String> {
         let command_id = command.id.clone();
-        self.queue.enqueue(command).await?;
+        self.queue.enqueue(command.clone()).await?;
+        
+        // 保存到数据库
+        #[cfg(feature = "persistence")]
+        if let Some(repo) = &self.repository {
+            if let Err(e) = repo.save(&command).await {
+                warn!(error = %e, "Failed to save command to database");
+            }
+        }
         
         info!(
             command_id = %command_id,
@@ -88,6 +111,14 @@ impl CommandExecutor {
                         command.mark_success(Some(response));
                         self.queue.update(command.clone()).await?;
                         
+                        // 更新数据库
+                        #[cfg(feature = "persistence")]
+                        if let Some(repo) = &self.repository {
+                            if let Err(e) = repo.save(&command).await {
+                                warn!(error = %e, "Failed to update command in database");
+                            }
+                        }
+                        
                         if let Some(handler) = &self.response_handler {
                             handler.handle_success(&command).await?;
                         }
@@ -95,6 +126,14 @@ impl CommandExecutor {
                     Ok(Err(e)) => {
                         command.mark_failed(e.to_string());
                         self.queue.update(command.clone()).await?;
+                        
+                        // 更新数据库
+                        #[cfg(feature = "persistence")]
+                        if let Some(repo) = &self.repository {
+                            if let Err(e) = repo.save(&command).await {
+                                warn!(error = %e, "Failed to update command in database");
+                            }
+                        }
                         
                         if let Some(handler) = &self.response_handler {
                             handler.handle_failure(&command).await?;
@@ -164,6 +203,75 @@ impl CommandExecutor {
     pub async fn get_command(&self, command_id: &str) -> Option<DeviceCommand> {
         self.queue.get(command_id).await
     }
+    
+    /// 查询设备的指令历史
+    #[cfg(feature = "persistence")]
+    pub async fn list_device_commands(&self, device_id: &str, limit: u64) -> anyhow::Result<Vec<DeviceCommand>> {
+        if let Some(repo) = &self.repository {
+            let models = repo.find_by_device(device_id, limit).await?;
+            
+            // 将数据库模型转换为 DeviceCommand
+            let commands: Vec<DeviceCommand> = models.into_iter()
+                .filter_map(|model| {
+                    // 解析 command_type
+                    let command_type = match model.command_type.as_str() {
+                        s if s.starts_with("SetState") => CommandType::SetState { state: true },
+                        "Reboot" => CommandType::Reboot,
+                        "Reset" => CommandType::Reset,
+                        s if s.starts_with("Custom") => {
+                            // 尝试从 params 中提取自定义指令名称
+                            let params_value = model.params.clone().unwrap_or_else(|| serde_json::json!({}));
+                            let name = params_value.get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            CommandType::Custom { 
+                                name, 
+                                params: params_value
+                            }
+                        }
+                        _ => return None,
+                    };
+                    
+                    // 解析 status
+                    let status = match model.status.as_str() {
+                        "Pending" => CommandStatus::Pending,
+                        "Sent" => CommandStatus::Sent,
+                        "Executing" => CommandStatus::Executing,
+                        "Success" => CommandStatus::Success,
+                        "Failed" => CommandStatus::Failed,
+                        "Timeout" => CommandStatus::Timeout,
+                        "Cancelled" => CommandStatus::Cancelled,
+                        _ => return None,
+                    };
+                    
+                    // 解析 params
+                    let params = model.params
+                        .and_then(|p| serde_json::from_value(p).ok())
+                        .unwrap_or_default();
+                    
+                    Some(DeviceCommand {
+                        id: model.id,
+                        device_id: model.device_id,
+                        command_type,
+                        params,
+                        timeout: Duration::from_secs(model.timeout_seconds as u64),
+                        status,
+                        created_at: model.created_at,
+                        sent_at: model.sent_at,
+                        executed_at: model.executed_at,
+                        completed_at: model.completed_at,
+                        result: model.result,
+                        error: model.error,
+                    })
+                })
+                .collect();
+            
+            Ok(commands)
+        } else {
+            Ok(vec![])
+        }
+    }
 
     /// 启动后台执行器
     pub async fn start(&self) -> anyhow::Result<()> {
@@ -216,6 +324,8 @@ impl CommandExecutor {
             queue: self.queue.clone(),
             channel: self.channel.clone(),
             response_handler: self.response_handler.clone(),
+            #[cfg(feature = "persistence")]
+            repository: self.repository.clone(),
             running: self.running.clone(),
         }
     }

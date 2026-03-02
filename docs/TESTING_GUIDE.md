@@ -533,12 +533,196 @@ cargo tarpaulin --packages flux-server flux-mqtt --out Stdout
   - [ ] 磁盘健康检查
   - [ ] 自动故障转移
   - [ ] 容量监控
+  - [x] 元数据索引（PostgreSQL）
+  - [x] 混合缓存模式
+  - [x] 通用 key-value 元数据
 
 - [ ] **flux-server**
   - [ ] REST API 端点
   - [ ] 认证/授权
   - [ ] 配置热重载
   - [ ] 优雅关闭
+
+- [x] **HLS 时移回放**
+  - [x] 元数据记录
+  - [x] 时移回放 API
+  - [x] M3U8 生成
+  - [x] 时间范围查询
+  - [x] 关键帧过滤
+
+---
+
+## HLS 时移回放测试
+
+### 自动化测试脚本
+
+**位置**: `scripts/test_timeshift.sh`
+
+**功能**:
+- ✅ 推送测试 RTMP 流
+- ✅ 验证元数据保存
+- ✅ 测试实时播放
+- ✅ 测试时移回放
+- ✅ 测试分片加载
+
+**运行方式**:
+```bash
+# 设置数据库 URL
+export DATABASE_URL="postgres://localhost/flux_iot"
+
+# 运行测试脚本
+./scripts/test_timeshift.sh
+```
+
+### 手动测试步骤
+
+#### 1. 启动服务
+
+```bash
+# 启动 flux-rtmpd（带 PostgreSQL 支持）
+export DATABASE_URL="postgres://localhost/flux_iot"
+cargo run -p flux-rtmpd --features postgres
+```
+
+#### 2. 推送测试流
+
+```bash
+# 使用 FFmpeg 推送测试流
+ffmpeg -re -i test.mp4 -t 60 \
+  -c:v libx264 -c:a aac \
+  -f flv rtmp://localhost:1935/live/test123
+```
+
+#### 3. 验证元数据
+
+```bash
+# 查询 PostgreSQL 元数据
+psql $DATABASE_URL -c "
+SELECT 
+    segment_id,
+    metadata->>'start_time' as start_time,
+    metadata->>'duration' as duration,
+    metadata->>'size' as size
+FROM storage.segment_metadata
+WHERE stream_id = 'rtmp/live/test123'
+  AND metadata->>'protocol' = 'hls'
+ORDER BY segment_id DESC
+LIMIT 10;
+"
+```
+
+#### 4. 测试实时播放
+
+```bash
+# 获取实时播放列表
+curl http://localhost:8082/hls/rtmp/live/test123/index.m3u8
+```
+
+#### 5. 测试时移回放
+
+```bash
+# 获取第一个分片的时间
+FIRST_TIME=$(psql $DATABASE_URL -t -c "
+SELECT metadata->>'start_time'
+FROM storage.segment_metadata
+WHERE stream_id = 'rtmp/live/test123'
+ORDER BY segment_id LIMIT 1;
+" | tr -d ' ')
+
+# 测试时移回放
+curl "http://localhost:8082/hls/live/test123/timeshift.m3u8?start_time=${FIRST_TIME}"
+
+# 测试带时长参数
+curl "http://localhost:8082/hls/live/test123/timeshift.m3u8?start_time=${FIRST_TIME}&duration=60"
+
+# 测试关键帧参数
+curl "http://localhost:8082/hls/live/test123/timeshift.m3u8?start_time=${FIRST_TIME}&from_keyframe=true"
+```
+
+#### 6. 测试分片加载
+
+```bash
+# 加载特定分片
+curl -I http://localhost:8082/hls/rtmp/live/test123/segment_0.ts
+```
+
+### 性能测试
+
+#### 元数据查询性能
+
+```bash
+# 使用 psql 的 \timing 命令
+psql $DATABASE_URL << EOF
+\timing on
+SELECT COUNT(*)
+FROM storage.segment_metadata
+WHERE stream_id = 'rtmp/live/test123'
+  AND metadata->>'protocol' = 'hls';
+EOF
+```
+
+**预期结果**: < 5ms
+
+#### 时移回放 API 性能
+
+```bash
+# 使用 curl 测量响应时间
+curl -w "@curl-format.txt" -o /dev/null -s \
+  "http://localhost:8082/hls/live/test123/timeshift.m3u8?start_time=2026-02-23T15:00:00Z"
+```
+
+**curl-format.txt**:
+```
+time_namelookup:  %{time_namelookup}\n
+time_connect:  %{time_connect}\n
+time_starttransfer:  %{time_starttransfer}\n
+time_total:  %{time_total}\n
+```
+
+**预期结果**: < 50ms
+
+### 集成测试
+
+```rust
+// tests/timeshift_integration_test.rs
+use flux_storage::{LocalSegmentStorage, SegmentMetadata, SegmentStorage};
+use std::collections::HashMap;
+
+#[tokio::test]
+async fn test_timeshift_metadata_query() -> anyhow::Result<()> {
+    // 1. 创建测试存储
+    let storage = LocalSegmentStorage::new(
+        std::path::PathBuf::from("./test_data")
+    );
+    
+    // 2. 保存测试分片
+    let mut metadata = SegmentMetadata::new();
+    metadata
+        .set("protocol", "hls")
+        .set("start_time", "2026-02-23T15:00:00Z")
+        .set("duration", "10.0")
+        .set("has_keyframe", "true");
+    
+    storage.save_segment_with_metadata(
+        "test/stream",
+        1,
+        metadata,
+        b"test data",
+    ).await?;
+    
+    // 3. 查询元数据
+    let mut filter = HashMap::new();
+    filter.insert("protocol".to_string(), "hls".to_string());
+    
+    let results = storage.query_metadata("test/stream", filter).await?;
+    
+    // 4. 验证结果
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, 1);
+    
+    Ok(())
+}
+```
 
 ---
 

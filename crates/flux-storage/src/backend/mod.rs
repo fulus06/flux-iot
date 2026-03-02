@@ -4,7 +4,13 @@ use bytes::Bytes;
 
 pub mod local;
 
+#[cfg(feature = "s3")]
+pub mod s3;
+
 pub use local::LocalBackend;
+
+#[cfg(feature = "s3")]
+pub use s3::{S3Backend, S3Config};
 
 /// 存储后端抽象 trait
 /// 

@@ -24,5 +24,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
+# SRT 协议支持（使用成熟的库）
+srt-tokio = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

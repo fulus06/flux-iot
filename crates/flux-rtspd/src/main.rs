@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
         &args.keyframe_dir,
     )));
 
-    // 创建时移核心
+    // 创建时移核心（集成 flux-storage）
     let timeshift = if timeshift_config.enabled {
         let ts_config = TimeShiftConfig {
             enabled: timeshift_config.enabled,
@@ -235,9 +235,18 @@ async fn main() -> anyhow::Result<()> {
             batch_write_interval: timeshift_config.batch_write_interval,
             lru_cache_size_mb: timeshift_config.lru_cache_size_mb,
         };
-        Some(Arc::new(TimeShiftCore::new(
+        
+        // 创建时移专用存储
+        use flux_storage::LocalSegmentStorage;
+        let timeshift_storage = Arc::new(LocalSegmentStorage::with_storage_manager(
+            storage_manager.clone(),
+            timeshift_config.storage_root.join("rtsp"),
+        ));
+        
+        Some(Arc::new(TimeShiftCore::with_storage(
             ts_config,
-            timeshift_config.storage_root.join("rtsp")
+            timeshift_config.storage_root.join("rtsp"),
+            Some(timeshift_storage as Arc<dyn flux_storage::SegmentStorage>),
         )))
     } else {
         None

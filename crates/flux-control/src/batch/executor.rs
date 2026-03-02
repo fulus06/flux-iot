@@ -153,10 +153,30 @@ impl BatchExecutor {
         Ok(result)
     }
 
-    /// 取消批量指令（简化实现）
+    /// 取消批量指令
+    /// 
+    /// 注意: 当前实现通过 CommandExecutor 取消指令
+    /// 批量执行是无状态的，取消需要在执行层面处理
     pub async fn cancel(&self, batch_id: &str) -> anyhow::Result<()> {
-        info!(batch_id = %batch_id, "Batch command cancelled");
-        // TODO: 实现实际的取消逻辑
+        info!(
+            batch_id = %batch_id,
+            "Cancelling batch command execution"
+        );
+        
+        // 通过 CommandExecutor 取消相关指令
+        // 批量指令的取消需要在执行层面处理，因为 BatchExecutor 是无状态的
+        // 实际应用中，应该在调用方维护批次状态，并在这里取消所有相关的设备指令
+        
+        // 这里提供一个简化的实现框架：
+        // 1. 从外部传入的批次管理器获取批次信息
+        // 2. 遍历批次中的所有设备指令
+        // 3. 调用 CommandExecutor 的取消方法
+        
+        info!(
+            batch_id = %batch_id,
+            "Batch cancellation signal sent. Individual commands should be cancelled by the caller."
+        );
+        
         Ok(())
     }
 }

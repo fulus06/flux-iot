@@ -15,6 +15,12 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub gb28181: Gb28181Config,
+    #[serde(default)]
+    pub rule: RuleConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub timescale: TimescaleConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -171,6 +177,49 @@ pub struct LoggingConfig {
     pub level: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct RuleConfig {
+    /// Webhook URL for rule notifications
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    /// 基础存储路径
+    #[serde(default = "default_storage_base_path")]
+    pub base_path: String,
+    
+    /// S3 配置（可选）
+    #[serde(default)]
+    pub s3: Option<S3StorageConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct S3StorageConfig {
+    pub bucket: String,
+    pub region: String,
+    pub prefix: Option<String>,
+    pub endpoint: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TimescaleConfig {
+    /// 归档保留天数（默认 30 天后归档）
+    #[serde(default = "default_archive_retention_days")]
+    pub archive_retention_days: i64,
+    
+    /// 是否在归档后删除原始数据
+    #[serde(default)]
+    pub delete_after_archive: bool,
+    
+    /// 是否启用 S3 归档（使用 storage.s3 配置）
+    #[serde(default)]
+    pub use_s3_archive: bool,
+}
+
 // 默认值函数
 fn default_eventbus_capacity() -> usize {
     1024
@@ -219,6 +268,41 @@ impl Default for LoggingConfig {
     }
 }
 
+impl Default for RuleConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+        }
+    }
+}
+
+fn default_storage_base_path() -> String {
+    "/var/lib/flux-iot".to_string()
+}
+
+fn default_archive_retention_days() -> i64 {
+    30
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            base_path: default_storage_base_path(),
+            s3: None,
+        }
+    }
+}
+
+impl Default for TimescaleConfig {
+    fn default() -> Self {
+        Self {
+            archive_retention_days: default_archive_retention_days(),
+            delete_after_archive: false,
+            use_s3_archive: false,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -227,7 +311,7 @@ impl Default for AppConfig {
                 port: 3000,
             },
             database: DatabaseConfig {
-                url: "sqlite::memory:".to_string(),
+                url: "postgresql://flux:flux@localhost/flux_iot".to_string(),
             },
             plugins: PluginConfig {
                 directory: "plugins".to_string(),
@@ -236,6 +320,9 @@ impl Default for AppConfig {
             mqtt: MqttConfig::default(),
             logging: LoggingConfig::default(),
             gb28181: Gb28181Config::default(),
+            rule: RuleConfig::default(),
+            storage: StorageConfig::default(),
+            timescale: TimescaleConfig::default(),
         }
     }
 }

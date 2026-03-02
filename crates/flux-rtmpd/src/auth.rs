@@ -4,9 +4,12 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::AppState;
+
+#[cfg(feature = "persistence")]
+use flux_middleware::UserRepository;
 
 /// 登录请求
 #[derive(Debug, Deserialize)]
@@ -28,11 +31,21 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    // TODO: 实际项目中应该从数据库验证用户名密码
-    // 这里简化处理，仅作演示
-    
-    // 验证用户名密码（示例）
-    let (user_id, roles) = match verify_credentials(&req.username, &req.password).await {
+    // 验证用户名密码
+    #[cfg(feature = "persistence")]
+    let (user_id, roles) = {
+        // 使用数据库验证
+        match verify_credentials(&req.username, &req.password, &state.user_repository).await {
+            Ok(user) => user,
+            Err(e) => {
+                tracing::warn!(username = %req.username, error = %e, "Login failed");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    };
+
+    #[cfg(not(feature = "persistence"))]
+    let (user_id, roles) = match verify_credentials_fallback(&req.username, &req.password).await {
         Ok(user) => user,
         Err(_) => return Err(StatusCode::UNAUTHORIZED),
     };
@@ -62,16 +75,54 @@ pub async fn login(
     }))
 }
 
-/// 验证用户凭据（示例实现）
+/// 验证用户凭据（数据库 + bcrypt）
+#[cfg(feature = "persistence")]
+async fn verify_credentials(
+    username: &str,
+    password: &str,
+    repository: &UserRepository,
+) -> Result<(String, Vec<String>), anyhow::Error> {
+    // 1. 从数据库查询用户
+    let user = repository
+        .find_by_username(username)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+    
+    // 2. 检查用户是否启用
+    if !user.enabled {
+        warn!(username = %username, "Login attempt for disabled user");
+        return Err(anyhow::anyhow!("User is disabled"));
+    }
+    
+    // 3. 验证密码哈希（使用 bcrypt）
+    let password_valid = bcrypt::verify(password, &user.password_hash)
+        .map_err(|e| anyhow::anyhow!("Password verification failed: {}", e))?;
+    
+    if !password_valid {
+        warn!(username = %username, "Invalid password attempt");
+        return Err(anyhow::anyhow!("Invalid password"));
+    }
+    
+    // 4. 返回用户信息和角色
+    let roles = user.get_roles();
+    
+    Ok((user.id, roles))
+}
+
+/// 验证用户凭据（回退到示例实现）
+#[cfg(not(feature = "persistence"))]
 async fn verify_credentials(
     username: &str,
     password: &str,
 ) -> Result<(String, Vec<String>), anyhow::Error> {
-    // TODO: 实际项目中应该：
-    // 1. 从数据库查询用户
-    // 2. 验证密码哈希（使用 bcrypt）
-    // 3. 返回用户信息和角色
-    
+    verify_credentials_fallback(username, password).await
+}
+
+/// 示例凭据验证（用于测试和回退）
+async fn verify_credentials_fallback(
+    username: &str,
+    password: &str,
+) -> Result<(String, Vec<String>), anyhow::Error> {
     // 示例：硬编码的测试用户
     match (username, password) {
         ("admin", "admin123") => {

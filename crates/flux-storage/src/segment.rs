@@ -1,13 +1,64 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::manager::StorageManager;
+
+/// 分片元数据（类似 OSS 对象元数据）
+/// 
+/// 通用的 key-value 元数据结构，由调用方自定义内容
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SegmentMetadata {
+    /// 自定义元数据（key-value 对）
+    /// 
+    /// 示例：
+    /// - "stream_id": "app/stream1"
+    /// - "segment_id": "1"
+    /// - "start_time": "2026-02-23T15:00:00Z"
+    /// - "duration": "10.0"
+    /// - "size": "1024000"
+    /// - "has_keyframe": "true"
+    /// - "codec": "h264"
+    /// - "resolution": "1920x1080"
+    pub metadata: HashMap<String, String>,
+}
+
+impl SegmentMetadata {
+    /// 创建新的元数据
+    pub fn new() -> Self {
+        Self {
+            metadata: HashMap::new(),
+        }
+    }
+    
+    /// 设置元数据
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+    
+    /// 获取元数据
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.metadata.get(key)
+    }
+    
+    /// 批量设置元数据
+    pub fn set_many(&mut self, pairs: Vec<(String, String)>) -> &mut Self {
+        for (k, v) in pairs {
+            self.metadata.insert(k, v);
+        }
+        self
+    }
+}
 
 /// 分片存储抽象 trait
 #[async_trait]
@@ -28,6 +79,24 @@ pub trait SegmentStorage: Send + Sync {
         data: &[u8],
     ) -> Result<String>;
     
+    /// 保存分片（带元数据）
+    /// 
+    /// # 参数
+    /// - `stream_id`: 流 ID
+    /// - `segment_id`: 分片序号
+    /// - `metadata`: 自定义元数据
+    /// - `data`: 分片数据
+    async fn save_segment_with_metadata(
+        &self,
+        stream_id: &str,
+        segment_id: u64,
+        metadata: SegmentMetadata,
+        data: &[u8],
+    ) -> Result<String> {
+        // 默认实现：只保存数据，忽略元数据
+        self.save_segment(stream_id, segment_id, data).await
+    }
+    
     /// 加载分片
     async fn load_segment(
         &self,
@@ -44,6 +113,33 @@ pub trait SegmentStorage: Send + Sync {
     
     /// 列出流的所有分片
     async fn list_segments(&self, stream_id: &str) -> Result<Vec<u64>>;
+    
+    /// 获取分片元数据
+    async fn get_segment_metadata(
+        &self,
+        stream_id: &str,
+        segment_id: u64,
+    ) -> Result<SegmentMetadata> {
+        // 默认实现：返回基础元数据
+        Err(anyhow!("Metadata not supported"))
+    }
+    
+    /// 查询元数据
+    /// 
+    /// # 参数
+    /// - `stream_id`: 流 ID
+    /// - `filter`: 过滤条件（key-value 对，所有条件必须匹配）
+    /// 
+    /// # 返回
+    /// 返回 (segment_id, metadata) 列表
+    async fn query_metadata(
+        &self,
+        stream_id: &str,
+        filter: HashMap<String, String>,
+    ) -> Result<Vec<(u64, SegmentMetadata)>> {
+        // 默认实现：不支持
+        Err(anyhow!("Metadata query not supported"))
+    }
     
     /// 清理过期分片
     /// 
@@ -92,6 +188,15 @@ pub struct LocalSegmentStorage {
     
     /// 基础目录（当没有 StorageManager 时使用）
     base_dir: PathBuf,
+    
+    /// 元数据索引（内存缓存，类似 OSS）
+    /// Key: "stream_id:segment_id"
+    /// Value: SegmentMetadata
+    metadata_index: Arc<RwLock<HashMap<String, SegmentMetadata>>>,
+    
+    /// PostgreSQL 元数据后端（可选，持久化）
+    #[cfg(feature = "postgres")]
+    pg_backend: Option<Arc<crate::metadata_pg::PostgresMetadataBackend>>,
 }
 
 impl LocalSegmentStorage {
@@ -100,6 +205,9 @@ impl LocalSegmentStorage {
         Self {
             storage_manager: None,
             base_dir,
+            metadata_index: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "postgres")]
+            pg_backend: None,
         }
     }
     
@@ -111,6 +219,38 @@ impl LocalSegmentStorage {
         Self {
             storage_manager: Some(storage_manager),
             base_dir,
+            metadata_index: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "postgres")]
+            pg_backend: None,
+        }
+    }
+    
+    /// 创建带 PostgreSQL 后端的本地分片存储（混合模式）
+    #[cfg(feature = "postgres")]
+    pub fn with_postgres(
+        base_dir: PathBuf,
+        pg_backend: Option<Arc<crate::metadata_pg::PostgresMetadataBackend>>,
+    ) -> Self {
+        Self {
+            storage_manager: None,
+            base_dir,
+            metadata_index: Arc::new(RwLock::new(HashMap::new())),
+            pg_backend,
+        }
+    }
+    
+    /// 创建带存储管理器和 PostgreSQL 后端的本地分片存储（完整混合模式）
+    #[cfg(feature = "postgres")]
+    pub fn with_storage_manager_and_postgres(
+        storage_manager: Arc<StorageManager>,
+        base_dir: PathBuf,
+        pg_backend: Option<Arc<crate::metadata_pg::PostgresMetadataBackend>>,
+    ) -> Self {
+        Self {
+            storage_manager: Some(storage_manager),
+            base_dir,
+            metadata_index: Arc::new(RwLock::new(HashMap::new())),
+            pg_backend,
         }
     }
     
@@ -411,6 +551,127 @@ impl SegmentStorage for LocalSegmentStorage {
         );
         
         Ok(deleted)
+    }
+    
+    async fn save_segment_with_metadata(
+        &self,
+        stream_id: &str,
+        segment_id: u64,
+        metadata: SegmentMetadata,
+        data: &[u8],
+    ) -> Result<String> {
+        // 1. 保存数据
+        let filename = self.save_segment(stream_id, segment_id, data).await?;
+        
+        // 2. 保存到内存索引（缓存）
+        {
+            let mut index = self.metadata_index.write().await;
+            let key = format!("{}:{}", stream_id, segment_id);
+            index.insert(key, metadata.clone());
+        }
+        
+        // 3. 异步保存到 PostgreSQL（write-through）
+        #[cfg(feature = "postgres")]
+        if let Some(ref pg) = self.pg_backend {
+            let pg = pg.clone();
+            let stream_id = stream_id.to_string();
+            let metadata = metadata.clone();
+            
+            tokio::spawn(async move {
+                if let Err(e) = pg.save_metadata(&stream_id, segment_id, &metadata).await {
+                    error!("Failed to save metadata to PostgreSQL: {}", e);
+                }
+            });
+        }
+        
+        debug!(
+            stream_id = %stream_id,
+            segment_id = segment_id,
+            has_pg = cfg!(feature = "postgres"),
+            "Metadata saved (hybrid mode)"
+        );
+        
+        Ok(filename)
+    }
+    
+    async fn get_segment_metadata(
+        &self,
+        stream_id: &str,
+        segment_id: u64,
+    ) -> Result<SegmentMetadata> {
+        let key = format!("{}:{}", stream_id, segment_id);
+        
+        // 1. 尝试从内存缓存读取
+        {
+            let index = self.metadata_index.read().await;
+            if let Some(metadata) = index.get(&key) {
+                debug!(stream_id = %stream_id, segment_id = segment_id, "Metadata hit in cache");
+                return Ok(metadata.clone());
+            }
+        }
+        
+        // 2. 缓存未命中，从 PostgreSQL 读取
+        #[cfg(feature = "postgres")]
+        if let Some(ref pg) = self.pg_backend {
+            match pg.get_metadata(stream_id, segment_id).await {
+                Ok(metadata) => {
+                    // 更新缓存
+                    let mut index = self.metadata_index.write().await;
+                    index.insert(key, metadata.clone());
+                    
+                    debug!(stream_id = %stream_id, segment_id = segment_id, "Metadata loaded from PostgreSQL and cached");
+                    return Ok(metadata);
+                }
+                Err(e) => {
+                    debug!("PostgreSQL metadata not found: {}", e);
+                }
+            }
+        }
+        
+        Err(anyhow!("Metadata not found: {}/{}", stream_id, segment_id))
+    }
+    
+    async fn query_metadata(
+        &self,
+        stream_id: &str,
+        filter: HashMap<String, String>,
+    ) -> Result<Vec<(u64, SegmentMetadata)>> {
+        // 优先使用 PostgreSQL 查询（更强大的查询能力）
+        #[cfg(feature = "postgres")]
+        if let Some(ref pg) = self.pg_backend {
+            match pg.query_metadata(stream_id, filter.clone()).await {
+                Ok(results) => {
+                    debug!(
+                        stream_id = %stream_id,
+                        count = results.len(),
+                        "Metadata queried from PostgreSQL"
+                    );
+                    return Ok(results);
+                }
+                Err(e) => {
+                    debug!("PostgreSQL query failed, falling back to memory: {}", e);
+                }
+            }
+        }
+        
+        // 回退到内存查询
+        let index = self.metadata_index.read().await;
+        let prefix = format!("{}:", stream_id);
+        let mut results = Vec::new();
+        for (key, metadata) in index.iter() {
+            if !key.starts_with(&prefix) { continue; }
+            let matches = filter.iter().all(|(k, v)| metadata.get(k).map(|mv| mv == v).unwrap_or(false));
+            if matches {
+                if let Some(id_str) = key.strip_prefix(&prefix) {
+                    if let Ok(segment_id) = id_str.parse::<u64>() {
+                        results.push((segment_id, metadata.clone()));
+                    }
+                }
+            }
+        }
+        results.sort_by_key(|(id, _)| *id);
+        debug!(stream_id = %stream_id, count = results.len(), "Metadata queried from memory");
+        Ok(results)
     }
 }
 

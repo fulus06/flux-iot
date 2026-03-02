@@ -222,6 +222,14 @@ impl CommandChannel for MqttCommandChannel {
 mod tests {
     use super::*;
 
+    fn dummy_client() -> AsyncClient {
+        let mut mqtt_options = MqttOptions::new("test_client", "127.0.0.1", 1883);
+        mqtt_options.set_keep_alive(Duration::from_secs(5));
+
+        let (client, _eventloop) = AsyncClient::new(mqtt_options, 1);
+        client
+    }
+
     #[test]
     fn test_extract_command_id() {
         let topic = "device/device_001/response/cmd_123";
@@ -232,7 +240,7 @@ mod tests {
     #[test]
     fn test_build_topics() {
         let channel = MqttCommandChannel {
-            client: todo!(),
+            client: dummy_client(),
             response_receivers: Arc::new(RwLock::new(HashMap::new())),
             command_topic_template: "device/{device_id}/command".to_string(),
             response_topic_template: "device/{device_id}/response".to_string(),

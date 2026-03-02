@@ -1,8 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
+use flux_storage::{LocalBackend, StorageBackend};
+#[cfg(feature = "s3")]
+use flux_storage::{S3Backend, S3Config};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// 归档目标
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,11 +87,66 @@ pub struct ArchiveStats {
 /// 数据归档器
 pub struct DataArchiver {
     db: Arc<DatabaseConnection>,
+    /// 存储后端（用于 S3/MinIO 归档）
+    storage_backend: Option<Arc<dyn StorageBackend>>,
 }
 
 impl DataArchiver {
+    /// 创建归档器（默认使用本地存储）
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
-        Self { db }
+        Self::new_with_path(db, PathBuf::from("/var/lib/flux-iot/archive"))
+    }
+    
+    /// 创建归档器并指定本地存储路径
+    pub fn new_with_path(db: Arc<DatabaseConnection>, storage_path: PathBuf) -> Self {
+        let local_backend = LocalBackend::new(storage_path);
+        Self { 
+            db,
+            storage_backend: Some(Arc::new(local_backend)),
+        }
+    }
+    
+    /// 创建带自定义存储后端的归档器（用于 S3/MinIO）
+    pub fn with_storage(db: Arc<DatabaseConnection>, storage: Arc<dyn StorageBackend>) -> Self {
+        Self {
+            db,
+            storage_backend: Some(storage),
+        }
+    }
+    
+    /// 从配置创建归档器（推荐）
+    /// 
+    /// 根据配置自动选择本地存储或 S3 存储
+    /// 
+    /// # 参数
+    /// - `base_path`: 基础存储路径（来自 storage.base_path）
+    /// - `s3_config`: S3 配置（来自 storage.s3）
+    #[cfg(feature = "s3")]
+    pub async fn from_config(
+        db: Arc<DatabaseConnection>,
+        base_path: String,
+        s3_config: Option<S3Config>,
+    ) -> anyhow::Result<Self> {
+        if let Some(s3_cfg) = s3_config {
+            let s3_backend = S3Backend::new(s3_cfg).await?;
+            Ok(Self::with_storage(db, Arc::new(s3_backend)))
+        } else {
+            // 在基础路径下创建 archive 子目录
+            let archive_path = PathBuf::from(base_path).join("archive");
+            Ok(Self::new_with_path(db, archive_path))
+        }
+    }
+    
+    /// 从配置创建归档器（无 S3 支持）
+    #[cfg(not(feature = "s3"))]
+    pub async fn from_config(
+        db: Arc<DatabaseConnection>,
+        base_path: String,
+        _s3_config: Option<()>,
+    ) -> anyhow::Result<Self> {
+        // 在基础路径下创建 archive 子目录
+        let archive_path = PathBuf::from(base_path).join("archive");
+        Ok(Self::new_with_path(db, archive_path))
     }
 
     /// 执行归档任务
@@ -189,33 +248,29 @@ impl DataArchiver {
                 
                 self.export_to_local_file(data, &final_path).await
             }
-            ArchiveDestination::S3 { bucket, region, prefix } => {
-                // 生成 S3 对象键
-                let now = Utc::now();
-                let timestamp = now.format("%Y%m%d_%H%M%S");
-                let object_key = format!("{}/{}_{}.json", prefix, table_name, timestamp);
-                
-                info!(
-                    bucket = %bucket,
-                    region = %region,
-                    key = %object_key,
-                    "S3 export not implemented yet"
-                );
-                Ok(0.0)
+            ArchiveDestination::S3 { bucket: _, region: _, prefix } => {
+                if let Some(backend) = &self.storage_backend {
+                    let now = Utc::now();
+                    let timestamp = now.format("%Y%m%d_%H%M%S");
+                    let object_key = format!("{}/{}_{}.json", prefix, table_name, timestamp);
+                    
+                    self.export_to_storage(data, backend.as_ref(), &object_key).await
+                } else {
+                    warn!("Storage backend not configured for S3 export");
+                    Err(anyhow::anyhow!("Storage backend not configured"))
+                }
             }
-            ArchiveDestination::MinIO { endpoint, bucket, .. } => {
-                // 生成 MinIO 对象键
-                let now = Utc::now();
-                let timestamp = now.format("%Y%m%d_%H%M%S");
-                let object_key = format!("{}_{}.json", table_name, timestamp);
-                
-                info!(
-                    endpoint = %endpoint,
-                    bucket = %bucket,
-                    key = %object_key,
-                    "MinIO export not implemented yet"
-                );
-                Ok(0.0)
+            ArchiveDestination::MinIO { endpoint: _, bucket: _, access_key: _, secret_key: _ } => {
+                if let Some(backend) = &self.storage_backend {
+                    let now = Utc::now();
+                    let timestamp = now.format("%Y%m%d_%H%M%S");
+                    let object_key = format!("{}_{}.json", table_name, timestamp);
+                    
+                    self.export_to_storage(data, backend.as_ref(), &object_key).await
+                } else {
+                    warn!("Storage backend not configured for MinIO export");
+                    Err(anyhow::anyhow!("Storage backend not configured"))
+                }
             }
         }
     }
@@ -241,6 +296,28 @@ impl DataArchiver {
         file.write_all(json_data.as_bytes()).await?;
 
         info!(path = %path, size_mb = %size_mb, "Data exported to local file");
+        Ok(size_mb)
+    }
+
+    /// 导出到存储后端（S3/MinIO）
+    async fn export_to_storage(
+        &self,
+        data: &[serde_json::Value],
+        backend: &dyn StorageBackend,
+        object_key: &str,
+    ) -> anyhow::Result<f64> {
+        let json_data = serde_json::to_string_pretty(data)?;
+        let size_mb = json_data.len() as f64 / 1024.0 / 1024.0;
+        
+        backend.write(object_key, json_data.as_bytes()).await?;
+        
+        info!(
+            key = %object_key,
+            size_mb = %size_mb,
+            rows = data.len(),
+            "Data exported to storage backend"
+        );
+        
         Ok(size_mb)
     }
 
@@ -272,7 +349,7 @@ impl DataArchiver {
         Ok(())
     }
 
-    /// 恢复归档数据
+    /// 恢复归档数据（从本地文件）
     pub async fn restore_from_file(&self, file_path: &str, table_name: &str) -> anyhow::Result<u64> {
         use tokio::fs::File;
         use tokio::io::AsyncReadExt;
@@ -283,15 +360,78 @@ impl DataArchiver {
 
         let data: Vec<serde_json::Value> = serde_json::from_str(&contents)?;
         
-        // TODO: 实现数据恢复逻辑
+        self.restore_data(table_name, &data).await
+    }
+    
+    /// 恢复归档数据（从存储后端）
+    pub async fn restore_from_storage(&self, object_key: &str, table_name: &str) -> anyhow::Result<u64> {
+        if let Some(backend) = &self.storage_backend {
+            let data_bytes = backend.read(object_key).await?;
+            let contents = String::from_utf8(data_bytes.to_vec())?;
+            let data: Vec<serde_json::Value> = serde_json::from_str(&contents)?;
+            
+            self.restore_data(table_name, &data).await
+        } else {
+            Err(anyhow::anyhow!("Storage backend not configured"))
+        }
+    }
+    
+    /// 恢复数据到数据库
+    async fn restore_data(&self, table_name: &str, data: &[serde_json::Value]) -> anyhow::Result<u64> {
+        let mut restored_count = 0u64;
+        
+        for record in data {
+            // 构造 INSERT 语句
+            let time = record.get("time")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                .unwrap_or_else(Utc::now);
+            
+            let device_id = record.get("device_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            
+            let metric_name = record.get("metric_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            
+            let metric_value = record.get("metric_value")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            
+            let sql = format!(
+                "INSERT INTO {} (time, device_id, metric_name, metric_value) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                table_name
+            );
+            
+            let stmt = Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                sql,
+                vec![
+                    time.into(),
+                    device_id.into(),
+                    metric_name.into(),
+                    metric_value.into(),
+                ],
+            );
+            
+            match self.db.execute(stmt).await {
+                Ok(result) => {
+                    restored_count += result.rows_affected();
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to restore record");
+                }
+            }
+        }
+        
         info!(
-            file = %file_path,
             table = %table_name,
-            rows = data.len(),
-            "Archive restore not fully implemented yet"
+            restored_rows = restored_count,
+            "Archive data restored"
         );
-
-        Ok(data.len() as u64)
+        
+        Ok(restored_count)
     }
 }
 

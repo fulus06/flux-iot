@@ -21,7 +21,12 @@ uuid = { version = "1.0", features = ["v4"] }
 # Workspace dependencies
 flux-core = { path = "../flux-core" }
 flux-types = { path = "../flux-types" }
+flux-storage = { path = "../flux-storage" }
 
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-subscriber = "0.3"
+
+[features]
+default = []
+s3 = ["flux-storage/s3"]

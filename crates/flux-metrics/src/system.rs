@@ -1,4 +1,4 @@
-use sysinfo::System;
+use sysinfo::{System, Disks};
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::debug;
@@ -8,6 +8,7 @@ use crate::collector::MetricsCollector;
 /// 系统指标收集器
 pub struct SystemMetricsCollector {
     system: System,
+    disks: Disks,
     metrics: Arc<MetricsCollector>,
 }
 
@@ -15,29 +16,54 @@ impl SystemMetricsCollector {
     pub fn new(metrics: Arc<MetricsCollector>) -> Self {
         Self {
             system: System::new_all(),
+            disks: Disks::new_with_refreshed_list(),
             metrics,
         }
     }
 
     /// 更新系统指标
     pub fn update(&mut self) {
-        self.system.refresh_all();
+        // 刷新 CPU 信息
+        self.system.refresh_cpu();
+        
+        // 刷新内存信息
+        self.system.refresh_memory();
+        
+        // 刷新磁盘信息
+        self.disks.refresh();
 
-        // CPU 使用率（简化实现，设置为 0）
-        let cpu_usage = 0.0;
+        // 获取全局 CPU 使用率
+        let cpu_usage = self.system.global_cpu_info().cpu_usage() as f64;
         self.metrics.set_cpu_usage(cpu_usage);
 
-        // 内存使用
+        // 获取内存使用
         let memory_used = self.system.used_memory();
         self.metrics.set_memory_usage(memory_used);
 
-        // 磁盘使用（简化实现）
-        self.metrics.set_disk_usage("/", 0.0);
+        // 获取磁盘使用率
+        for disk in self.disks.list() {
+            let mount_point = disk.mount_point().to_string_lossy().to_string();
+            let total = disk.total_space() as f64;
+            let available = disk.available_space() as f64;
+            
+            if total > 0.0 {
+                let usage = ((total - available) / total) * 100.0;
+                self.metrics.set_disk_usage(&mount_point, usage);
+                
+                debug!(
+                    mount_point = %mount_point,
+                    usage = %usage,
+                    total_gb = %(total / 1024.0 / 1024.0 / 1024.0),
+                    available_gb = %(available / 1024.0 / 1024.0 / 1024.0),
+                    "Disk metrics updated"
+                );
+            }
+        }
 
         debug!(
-            "System metrics updated: CPU={:.2}%, Memory={}MB",
-            cpu_usage * 100.0,
-            memory_used / 1024 / 1024
+            cpu = %cpu_usage,
+            memory_mb = %(memory_used / 1024 / 1024),
+            "System metrics updated"
         );
     }
 

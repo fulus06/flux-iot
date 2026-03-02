@@ -1,6 +1,15 @@
 # flux-timeseries
 
-时序数据存储包，基于 TimescaleDB 实现高性能的物联网时序数据存储。
+时序数据存储模块，提供高性能的时序数据写入、查询、聚合和归档功能。
+
+## 功能特性
+
+- ✅ 高性能时序数据写入和查询
+- ✅ 数据聚合（平均值、最大值、最小值、求和、计数）
+- ✅ 数据保留策略（Retention Policy）
+- ✅ 数据归档（Archive）到本地文件、S3、MinIO
+- ✅ 归档数据恢复（Restore）
+- ✅ 自动降采样（Downsampling）的物联网时序数据存储。
 
 ## 功能特性
 
@@ -220,6 +229,150 @@ CREATE TABLE device_events (
 );
 
 SELECT create_hypertable('device_events', 'time');
+```
+
+## 数据归档和恢复
+
+### 使用配置文件（推荐）
+
+**配置文件** (`config.toml`):
+```toml
+[storage]
+# 基础存储路径（所有模块共用）
+base_path = "/var/lib/flux-iot"
+
+[timescale]
+# 归档保留天数
+archive_retention_days = 30
+# 是否在归档后删除原始数据
+delete_after_archive = false
+```
+
+**代码**:
+```rust
+use flux_timeseries::{DataArchiver, ArchivePolicy, ArchiveDestination};
+use chrono::Duration;
+
+// 从配置创建归档器（推荐）
+// 自动使用 {base_path}/archive 作为归档路径
+let archiver = DataArchiver::from_config(
+    db.clone(),
+    config.storage.base_path.clone(),
+    None, // 不使用 S3
+).await?;
+
+// 定义归档策略
+let policy = ArchivePolicy {
+    table_name: "metrics".to_string(),
+    archive_older_than: Duration::days(config.timescale.archive_retention_days),
+    destination: ArchiveDestination::LocalFile {
+        path: format!("{}/archive", config.storage.base_path),
+    },
+    delete_after_archive: config.timescale.delete_after_archive,
+};
+
+// 执行归档
+let stats = archiver.archive(&policy).await?;
+println!("归档完成: {} 行, {:.2} MB", stats.archived_rows, stats.archive_size_mb);
+```
+
+### 直接使用（不依赖配置）
+
+```rust
+// 使用默认路径
+let archiver = DataArchiver::new(db.clone());
+
+// 或指定自定义路径
+let archiver = DataArchiver::new_with_path(
+    db.clone(),
+    PathBuf::from("/data/archive")
+);
+```
+
+### 使用 S3 归档（可选）
+
+启用 S3 功能：
+
+```toml
+[dependencies]
+flux-timeseries = { version = "0.1", features = ["s3"] }
+```
+
+使用 S3：
+
+```rust
+use flux_storage::{S3Backend, S3Config};
+use flux_timeseries::{DataArchiver, ArchivePolicy, ArchiveDestination};
+
+// 配置 S3
+let s3_config = S3Config {
+    bucket: "flux-archive".to_string(),
+    region: "us-east-1".to_string(),
+    endpoint: None,
+    access_key_id: None, // 使用 AWS 凭证链
+    secret_access_key: None,
+    prefix: Some("timeseries".to_string()),
+};
+
+// 创建 S3 后端
+let s3_backend = S3Backend::new(s3_config).await?;
+
+// 创建归档器
+let archiver = DataArchiver::with_storage(
+    db.clone(),
+    Arc::new(s3_backend)
+);
+
+// 定义 S3 归档策略
+let policy = ArchivePolicy {
+    table_name: "metrics".to_string(),
+    archive_older_than: Duration::days(30),
+    destination: ArchiveDestination::S3 {
+        bucket: "flux-archive".to_string(),
+        region: "us-east-1".to_string(),
+        prefix: "timeseries".to_string(),
+    },
+    delete_after_archive: true,
+};
+
+// 执行归档
+let stats = archiver.archive(&policy).await?;
+
+// 从 S3 恢复
+let count = archiver.restore_from_storage(
+    "timeseries/metrics_20240101_120000.json",
+    "metrics"
+).await?;
+```
+
+### 使用 MinIO 归档
+
+```rust
+let minio_config = S3Config {
+    bucket: "archive".to_string(),
+    region: "us-east-1".to_string(),
+    endpoint: Some("http://localhost:9000".to_string()),
+    access_key_id: Some("minioadmin".to_string()),
+    secret_access_key: Some("minioadmin".to_string()),
+    prefix: None,
+};
+
+let minio_backend = S3Backend::new(minio_config).await?;
+let archiver = DataArchiver::with_storage(db.clone(), Arc::new(minio_backend));
+
+let policy = ArchivePolicy {
+    table_name: "metrics".to_string(),
+    archive_older_than: Duration::days(30),
+    destination: ArchiveDestination::MinIO {
+        endpoint: "http://localhost:9000".to_string(),
+        bucket: "archive".to_string(),
+        access_key: "minioadmin".to_string(),
+        secret_key: "minioadmin".to_string(),
+    },
+    delete_after_archive: true,
+};
+
+let stats = archiver.archive(&policy).await?;
 ```
 
 ## 示例程序

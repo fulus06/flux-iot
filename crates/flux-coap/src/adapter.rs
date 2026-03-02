@@ -3,22 +3,26 @@ use crate::types::CoapConfig;
 use async_trait::async_trait;
 use flux_protocol::{ProtocolClient, ProtocolType, SubscriptionHandle};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::warn;
+use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 /// CoAP 协议适配器
 pub struct CoapAdapter {
-    client: Arc<Mutex<CoapClient>>,
-    connected: Arc<Mutex<bool>>,
+    client: Arc<RwLock<CoapClient>>,
+    connected: Arc<RwLock<bool>>,
+    /// 订阅句柄映射 (handle_id -> token)
+    subscriptions: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 impl CoapAdapter {
     /// 创建新的 CoAP 适配器
     pub fn new(config: CoapConfig) -> Self {
         Self {
-            client: Arc::new(Mutex::new(CoapClient::new(config))),
-            connected: Arc::new(Mutex::new(false)),
+            client: Arc::new(RwLock::new(CoapClient::new(config))),
+            connected: Arc::new(RwLock::new(false)),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -26,21 +30,22 @@ impl CoapAdapter {
 #[async_trait]
 impl ProtocolClient for CoapAdapter {
     async fn connect(&mut self) -> anyhow::Result<()> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.write().await;
         client.connect().await?;
-        *self.connected.lock().await = true;
+        *self.connected.write().await = true;
         Ok(())
     }
 
     async fn disconnect(&mut self) -> anyhow::Result<()> {
-        let mut client = self.client.lock().await;
+        let mut client = self.client.write().await;
         client.disconnect().await?;
-        *self.connected.lock().await = false;
+        *self.connected.write().await = false;
+        self.subscriptions.write().await.clear();
         Ok(())
     }
 
     async fn read(&self, address: &str) -> anyhow::Result<Value> {
-        let client = self.client.lock().await;
+        let client = self.client.read().await;
         
         // CoAP GET 请求
         let payload = client.get(address).await?;
@@ -65,7 +70,7 @@ impl ProtocolClient for CoapAdapter {
     }
 
     async fn write(&self, address: &str, value: Value) -> anyhow::Result<()> {
-        let client = self.client.lock().await;
+        let client = self.client.read().await;
         
         // 将 JSON 转换为字节
         let payload = serde_json::to_vec(&value)?;
@@ -85,16 +90,43 @@ impl ProtocolClient for CoapAdapter {
 
     async fn subscribe(
         &self,
-        _address: &str,
-        _callback: Box<dyn Fn(Value) + Send + Sync>,
+        address: &str,
+        callback: Box<dyn Fn(Value) + Send + Sync>,
     ) -> anyhow::Result<SubscriptionHandle> {
-        // CoAP Observe 功能需要更复杂的实现
-        // 这里先返回未实现错误
-        warn!("CoAP Observe not fully implemented yet");
-        Err(anyhow::anyhow!("CoAP Observe not implemented"))
+        let mut client = self.client.write().await;
+        
+        // 使用 CoAP Observe 订阅资源
+        let token = client.observe(address, move |payload| {
+            // 解析 payload 为 JSON
+            if let Ok(value) = serde_json::from_slice::<Value>(&payload) {
+                callback(value);
+            } else {
+                // 如果不是 JSON，返回字符串
+                let text = String::from_utf8_lossy(&payload).to_string();
+                callback(serde_json::json!(text));
+            }
+        }).await?;
+        
+        // 生成订阅句柄 ID
+        let handle_id = uuid::Uuid::new_v4().to_string();
+        
+        // 保存 token 映射
+        self.subscriptions.write().await.insert(handle_id.clone(), token);
+        
+        debug!(handle_id = %handle_id, address = %address, "CoAP Observe subscription created");
+        
+        Ok(SubscriptionHandle::new(handle_id))
     }
 
-    async fn unsubscribe(&self, _handle: SubscriptionHandle) -> anyhow::Result<()> {
+    async fn unsubscribe(&self, handle: SubscriptionHandle) -> anyhow::Result<()> {
+        let mut subs = self.subscriptions.write().await;
+        
+        if let Some(token) = subs.remove(&handle.id) {
+            let mut client = self.client.write().await;
+            client.cancel_observe(&token).await?;
+            debug!(handle_id = %handle.id, "CoAP Observe subscription cancelled");
+        }
+        
         Ok(())
     }
 

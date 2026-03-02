@@ -1,7 +1,6 @@
 pub mod command;
 pub mod channel;
 pub mod response;
-pub mod scene;
 pub mod batch;
 
 #[cfg(feature = "persistence")]
@@ -12,7 +11,6 @@ pub use command::{
 };
 pub use channel::CommandChannel;
 pub use response::ResponseHandler;
-pub use scene::{Scene, SceneEngine, TriggerManager};
 pub use batch::{BatchCommand, BatchExecutor, BatchResult};
 
 #[cfg(feature = "persistence")]

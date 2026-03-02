@@ -61,8 +61,9 @@ impl H265Depacketizer {
                 }
             }
             50 => {
-                // PACI (not commonly used)
-                warn!(target: "h265_depacketizer", "PACI packet not implemented");
+                // PACI (Payload Content Information)
+                // PACI 包含额外的负载内容信息，用于特殊场景
+                nalus.extend(self.process_paci(packet.timestamp, &packet.payload)?);
             }
             _ => {
                 warn!(target: "h265_depacketizer", "Unknown NAL type: {}", nal_type);
@@ -188,6 +189,85 @@ impl H265Depacketizer {
             data: data.freeze(),
             is_keyframe,
         })
+    }
+
+    /// 处理 PACI (Payload Content Information)
+    /// 
+    /// PACI 格式 (RFC 7798):
+    /// +---------------+---------------+
+    /// |0|1|2|3|4|5|6|7|0|1|2|3|4|5|6|7|
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |    PayloadHdr (Type=50)       |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |A|   cType   | PHSsize |F0..2|Y|
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |        Payload Header         |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |         NAL unit data         |
+    /// |                               |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// 
+    /// PACI 主要用于提供额外的负载内容信息，在实际应用中较少使用
+    /// 这里实现基本的解析，提取其中包含的 NAL units
+    fn process_paci(&self, timestamp: u32, payload: &[u8]) -> Result<Vec<H265Nalu>> {
+        let mut nalus = Vec::new();
+        
+        if payload.len() < 4 {
+            warn!(target: "h265_depacketizer", "PACI packet too short");
+            return Ok(nalus);
+        }
+        
+        // PACI header (2 bytes payload header + 1 byte PACI header)
+        let paci_header = payload[2];
+        let a_bit = (paci_header & 0x80) != 0;  // Aggregation bit
+        let phs_size = (paci_header >> 3) & 0x03;  // Payload header size
+        
+        debug!(
+            target: "h265_depacketizer",
+            "PACI: A={}, PHSsize={}",
+            a_bit, phs_size
+        );
+        
+        // 计算 payload header 的实际大小
+        let header_size = match phs_size {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            _ => 0,
+        };
+        
+        let data_start = 3 + header_size as usize;
+        
+        if payload.len() <= data_start {
+            return Ok(nalus);
+        }
+        
+        if a_bit {
+            // Aggregation mode: 包含多个 NAL units
+            let mut cursor = std::io::Cursor::new(&payload[data_start..]);
+            
+            while cursor.remaining() >= 2 {
+                let nalu_size = cursor.get_u16() as usize;
+                
+                if cursor.remaining() < nalu_size {
+                    break;
+                }
+                
+                let start = cursor.position() as usize;
+                let end = start + nalu_size;
+                let nalu_data = Bytes::copy_from_slice(&payload[data_start + start..data_start + end]);
+                
+                nalus.push(self.create_nalu(timestamp, nalu_data)?);
+                cursor.set_position((start + nalu_size) as u64);
+            }
+        } else {
+            // Single NAL unit mode
+            let nalu_data = Bytes::copy_from_slice(&payload[data_start..]);
+            nalus.push(self.create_nalu(timestamp, nalu_data)?);
+        }
+        
+        Ok(nalus)
     }
 }
 

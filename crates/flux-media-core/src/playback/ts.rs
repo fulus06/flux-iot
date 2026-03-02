@@ -198,6 +198,76 @@ impl TsMuxer {
         Ok(packets)
     }
 
+    /// 封装音频 PES 包（AAC）
+    pub fn mux_audio_pes(&mut self, data: &[u8], pts: u64) -> Result<Vec<Bytes>> {
+        let mut packets = Vec::new();
+
+        // 如果还没发送 PAT/PMT，先发送
+        if !self.pat_pmt_sent {
+            packets.push(self.generate_pat());
+            packets.push(self.generate_pmt());
+            self.pat_pmt_sent = true;
+        }
+
+        // 构造 PES header
+        let mut pes = BytesMut::new();
+        pes.put_slice(&[0x00, 0x00, 0x01]); // Packet start code
+        pes.put_u8(0xC0); // Stream ID (audio)
+        
+        // PES packet length (0 = unbounded)
+        pes.put_u16(0);
+
+        // PES header flags
+        pes.put_u8(0x80); // Marker bits
+        pes.put_u8(0x80); // PTS flag (no DTS for audio)
+        pes.put_u8(5); // PES header length
+
+        // PTS (33 bits, 90kHz)
+        pes.put_u8(0x21 | (((pts >> 30) & 0x07) << 1) as u8);
+        pes.put_u16((((pts >> 15) & 0x7FFF) << 1) as u16);
+        pes.put_u16((((pts) & 0x7FFF) << 1) as u16);
+
+        // PES data (AAC frame with ADTS header)
+        pes.put_slice(data);
+
+        // 分割成 TS 包
+        let pes_data = pes.freeze();
+        let mut offset = 0;
+        let mut first_packet = true;
+
+        while offset < pes_data.len() {
+            let mut packet = BytesMut::with_capacity(188);
+            
+            // TS Header
+            packet.put_u8(0x47); // Sync byte
+            
+            let mut flags = 0x00;
+            if first_packet {
+                flags |= 0x40; // Payload unit start indicator
+            }
+            packet.put_u8(flags);
+            packet.put_u8((self.audio_pid >> 8) as u8);
+            packet.put_u8((self.audio_pid & 0xFF) as u8 | 0x10 | (self.continuity_counter_audio & 0x0F));
+            self.continuity_counter_audio = (self.continuity_counter_audio + 1) & 0x0F;
+
+            // Payload
+            let payload_size = 188 - packet.len();
+            let chunk_size = std::cmp::min(payload_size, pes_data.len() - offset);
+            packet.put_slice(&pes_data[offset..offset + chunk_size]);
+            offset += chunk_size;
+
+            // Padding
+            while packet.len() < 188 {
+                packet.put_u8(0xFF);
+            }
+
+            packets.push(packet.freeze());
+            first_packet = false;
+        }
+
+        Ok(packets)
+    }
+
     /// 重置状态
     pub fn reset(&mut self) {
         self.pat_pmt_sent = false;
@@ -265,5 +335,44 @@ mod tests {
         
         assert!(!muxer.pat_pmt_sent);
         assert_eq!(muxer.continuity_counter_video, 0);
+    }
+
+    #[test]
+    fn test_mux_audio_pes() {
+        let mut muxer = TsMuxer::new();
+        // 模拟 AAC 音频帧（带 ADTS header）
+        let data = vec![0xFF, 0xF1, 0x50, 0x80, 0x01, 0x3F, 0xFC];
+        
+        let packets = muxer.mux_audio_pes(&data, 90000).unwrap();
+        
+        // 应该包含 PAT + PMT + 至少一个音频包
+        assert!(packets.len() >= 3);
+        assert!(muxer.pat_pmt_sent);
+        
+        // 验证音频包的基本结构
+        let audio_packet = &packets[2];
+        assert_eq!(audio_packet.len(), 188); // TS packet size
+        assert_eq!(audio_packet[0], 0x47); // Sync byte
+        
+        // 验证 continuity counter 已更新
+        assert_eq!(muxer.continuity_counter_audio, 1);
+    }
+
+    #[test]
+    fn test_audio_video_interleaved() {
+        let mut muxer = TsMuxer::new();
+        
+        // 先发送视频
+        let video_data = vec![0x00, 0x00, 0x00, 0x01, 0x67];
+        let video_packets = muxer.mux_video_pes(&video_data, 90000, 90000, true).unwrap();
+        assert!(video_packets.len() >= 3);
+        
+        // 再发送音频
+        let audio_data = vec![0xFF, 0xF1, 0x50, 0x80, 0x01, 0x3F, 0xFC];
+        let audio_packets = muxer.mux_audio_pes(&audio_data, 90000).unwrap();
+        
+        // 音频不应该再发送 PAT/PMT
+        assert!(audio_packets.len() >= 1);
+        assert_eq!(audio_packets[0][0], 0x47); // 直接是音频包
     }
 }

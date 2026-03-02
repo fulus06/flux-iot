@@ -197,7 +197,11 @@ impl RtmpServer {
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.app_name = Some(app_name.clone());
                     let results = session.session.accept_request(request_id)?;
-                    // TODO: 处理 accept 结果
+                    tracing::debug!(
+                        session_id = %session_id,
+                        app_name = %app_name,
+                        "RTMP connection request accepted"
+                    );
                     drop(results);
                 }
             }

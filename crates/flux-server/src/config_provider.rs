@@ -61,29 +61,11 @@ impl DbConfigProvider {
     async fn ensure_table(&self) -> Result<()> {
         let backend = self.db.get_database_backend();
 
-        let sql = match backend {
-            DbBackend::Sqlite => {
-                "CREATE TABLE IF NOT EXISTS app_config (\
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,\
-                    content TEXT NOT NULL,\
-                    updated_at INTEGER NOT NULL\
-                )"
-            }
-            DbBackend::Postgres => {
-                "CREATE TABLE IF NOT EXISTS app_config (\
-                    id BIGSERIAL PRIMARY KEY,\
-                    content TEXT NOT NULL,\
-                    updated_at BIGINT NOT NULL\
-                )"
-            }
-            DbBackend::MySql => {
-                "CREATE TABLE IF NOT EXISTS app_config (\
-                    id BIGINT AUTO_INCREMENT PRIMARY KEY,\
-                    content TEXT NOT NULL,\
-                    updated_at BIGINT NOT NULL\
-                )"
-            }
-        };
+        let sql = "CREATE TABLE IF NOT EXISTS app_config (\
+            id BIGSERIAL PRIMARY KEY,\
+            content TEXT NOT NULL,\
+            updated_at BIGINT NOT NULL\
+        )";
 
         self.db
             .execute(Statement::from_string(backend, sql.to_string()))
@@ -139,12 +121,7 @@ impl DbConfigProvider {
         let backend = self.db.get_database_backend();
         let now = chrono::Utc::now().timestamp_millis();
 
-        let insert_sql = match backend {
-            DbBackend::Postgres => "INSERT INTO app_config (content, updated_at) VALUES ($1, $2)",
-            DbBackend::Sqlite | DbBackend::MySql => {
-                "INSERT INTO app_config (content, updated_at) VALUES (?, ?)"
-            }
-        };
+        let insert_sql = "INSERT INTO app_config (content, updated_at) VALUES ($1, $2)";
 
         let stmt = Statement::from_sql_and_values(
             backend,

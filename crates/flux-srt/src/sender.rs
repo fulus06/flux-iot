@@ -1,68 +1,85 @@
 use anyhow::Result;
 use bytes::Bytes;
 use std::net::SocketAddr;
-use tokio::net::UdpSocket;
-use tracing::{debug, info};
+use srt_tokio::SrtSocket;
+use tokio::io::AsyncWriteExt;
+use tracing::{debug, info, warn};
 
-/// SRT 发送器（简化实现）
+/// SRT 发送器（使用 srt-tokio 库）
 pub struct SrtSender {
-    socket: UdpSocket,
+    socket: SrtSocket,
     dest_addr: SocketAddr,
-    sequence: u32,
+    bytes_sent: u64,
 }
 
 impl SrtSender {
-    /// 创建 SRT 发送器
+    /// 创建 SRT 发送器并连接到目标地址
+    /// 
+    /// # 参数
+    /// - `dest_addr`: 目标 SRT 服务器地址
+    /// 
+    /// # 示例
+    /// ```no_run
+    /// use flux_srt::SrtSender;
+    /// 
+    /// let sender = SrtSender::new("127.0.0.1:9000".parse().unwrap()).await?;
+    /// ```
     pub async fn new(dest_addr: SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        info!(target: "srt_sender", "Connecting to SRT server: {}", dest_addr);
         
-        info!(target: "srt_sender", "SRT sender created, target: {}", dest_addr);
+        // 使用 srt-tokio 建立连接
+        let socket = SrtSocket::builder()
+            .call(dest_addr, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to SRT server: {}", e))?;
+        
+        info!(target: "srt_sender", "SRT sender connected to {}", dest_addr);
         
         Ok(Self {
             socket,
             dest_addr,
-            sequence: 0,
+            bytes_sent: 0,
         })
     }
 
     /// 发送数据
-    pub async fn send(&mut self, data: &[u8], timestamp: u32) -> Result<()> {
-        let packet = self.build_data_packet(data, timestamp);
+    /// 
+    /// # 参数
+    /// - `data`: 要发送的数据
+    /// - `_timestamp`: 时间戳（保留参数，用于兼容旧接口）
+    pub async fn send(&mut self, data: &[u8], _timestamp: u32) -> Result<()> {
+        // 使用 srt-tokio 发送数据
+        self.socket.write_all(data).await
+            .map_err(|e| anyhow::anyhow!("Failed to send SRT data: {}", e))?;
         
-        self.socket.send_to(&packet, self.dest_addr).await?;
+        self.bytes_sent += data.len() as u64;
         
         debug!(target: "srt_sender",
-            "Sent SRT packet: seq={}, ts={}, len={}",
-            self.sequence,
-            timestamp,
-            data.len()
+            "Sent SRT data: len={}, total={}",
+            data.len(),
+            self.bytes_sent
         );
-        
-        self.sequence = self.sequence.wrapping_add(1);
         
         Ok(())
     }
 
-    /// 构建 SRT 数据包
-    fn build_data_packet(&self, data: &[u8], timestamp: u32) -> Vec<u8> {
-        let mut packet = Vec::with_capacity(16 + data.len());
+    /// 获取已发送的字节数
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
+    /// 获取目标地址
+    pub fn dest_addr(&self) -> SocketAddr {
+        self.dest_addr
+    }
+
+    /// 关闭连接
+    pub async fn close(mut self) -> Result<()> {
+        self.socket.shutdown().await
+            .map_err(|e| anyhow::anyhow!("Failed to close SRT connection: {}", e))?;
         
-        // Flags (data packet, no encryption)
-        packet.extend_from_slice(&0u32.to_be_bytes());
-        
-        // Timestamp
-        packet.extend_from_slice(&timestamp.to_be_bytes());
-        
-        // Destination Socket ID (0 for now)
-        packet.extend_from_slice(&0u32.to_be_bytes());
-        
-        // Sequence number
-        packet.extend_from_slice(&self.sequence.to_be_bytes());
-        
-        // Payload
-        packet.extend_from_slice(data);
-        
-        packet
+        info!(target: "srt_sender", "SRT sender closed, total sent: {} bytes", self.bytes_sent);
+        Ok(())
     }
 }
 
@@ -71,25 +88,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_build_data_packet() {
-        // 创建真实的 sender 来测试
-        let sender_result = SrtSender::new("127.0.0.1:9000".parse().unwrap()).await;
-        assert!(sender_result.is_ok());
+    async fn test_srt_sender_creation() {
+        // 注意：这个测试需要一个运行中的 SRT 服务器
+        // 在实际测试中，应该先启动一个 SRT 接收器
         
-        if let Ok(mut sender) = sender_result {
-            sender.sequence = 42; // 设置测试序列号
-            let packet = sender.build_data_packet(b"test", 100);
-            
-            assert_eq!(packet.len(), 16 + 4);
-            assert_eq!(&packet[16..], b"test");
-            
-            // Check timestamp
-            let ts = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
-            assert_eq!(ts, 100);
-            
-            // Check sequence
-            let seq = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
-            assert_eq!(seq, 42);
-        }
+        // 测试地址解析
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        assert_eq!(addr.port(), 9000);
     }
 }

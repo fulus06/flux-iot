@@ -11,6 +11,9 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+use crate::functions::register_builtin_functions_with_services;
+use crate::services::{NoopRuleServices, RuleServices};
+
 /// 规则引擎
 pub struct RuleEngine {
     /// Rhai 脚本引擎
@@ -28,8 +31,13 @@ pub struct RuleEngine {
 
 impl RuleEngine {
     pub fn new() -> Self {
-        let script_engine = ScriptEngine::new();
-        
+        Self::new_with_services(Arc::new(NoopRuleServices))
+    }
+
+    pub fn new_with_services(services: Arc<dyn RuleServices>) -> Self {
+        let mut script_engine = ScriptEngine::new();
+        register_builtin_functions_with_services(&mut script_engine, services);
+
         Self {
             script_engine: Arc::new(script_engine),
             storage: Arc::new(RuleStorage::new()),

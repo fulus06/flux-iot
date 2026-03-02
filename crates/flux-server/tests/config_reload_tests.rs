@@ -219,6 +219,7 @@ fn test_gb28181_auth_config_mapping() {
         eventbus: EventBusConfig { capacity: 1 },
         mqtt: MqttConfig::default(),
         logging: LoggingConfig::default(),
+        rule: Default::default(),
         gb28181: Gb28181Config {
             enabled: true,
             backend: Gb28181Backend::Embedded,

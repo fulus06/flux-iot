@@ -1,4 +1,4 @@
-use flux_config_manager::{ConfigManager, FileSource};
+use flux_config_manager::{ConfigManager, ConfigSource, FileSource};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -115,8 +115,17 @@ async fn test_config_hot_reload() {
 
     source.save(&updated_config).await.unwrap();
 
-    // 等待文件监听器检测到变更
-    sleep(Duration::from_millis(500)).await;
+    // 等待文件监听器检测到变更并触发热重载
+    let change = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("Timed out waiting for config change")
+        .expect("Config change channel closed");
+
+    match change {
+        flux_config_manager::ConfigChange::Updated { .. }
+        | flux_config_manager::ConfigChange::Loaded(_) => {}
+        flux_config_manager::ConfigChange::Deleted => panic!("Unexpected Deleted event"),
+    }
 
     // 验证配置已自动重新加载
     let current = manager.get().await.unwrap();

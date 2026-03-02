@@ -9,6 +9,7 @@ use tracing::{debug, error, info};
 
 use super::config::TimeShiftConfig;
 use super::storage::{ColdIndex, HotBuffer, SegmentMeta};
+use flux_storage::SegmentStorage;
 
 /// 分片格式
 #[derive(Clone, Debug, PartialEq)]
@@ -50,15 +51,29 @@ pub struct TimeShiftCore {
     
     /// 存储根目录
     storage_root: PathBuf,
+    
+    /// 统一存储接口（使用 flux-storage）
+    segment_storage: Option<Arc<dyn SegmentStorage>>,
 }
 
 impl TimeShiftCore {
+    /// 创建时移核心（使用简单文件系统）
     pub fn new(config: TimeShiftConfig, storage_root: PathBuf) -> Self {
+        Self::with_storage(config, storage_root, None)
+    }
+    
+    /// 创建时移核心（使用 flux-storage 统一存储）
+    pub fn with_storage(
+        config: TimeShiftConfig,
+        storage_root: PathBuf,
+        segment_storage: Option<Arc<dyn SegmentStorage>>,
+    ) -> Self {
         let core = Self {
             hot_cache: Arc::new(RwLock::new(HashMap::new())),
             cold_index: Arc::new(RwLock::new(HashMap::new())),
             config,
             storage_root,
+            segment_storage,
         };
         
         // 启动后台清理任务
@@ -92,9 +107,15 @@ impl TimeShiftCore {
             let stream_id = stream_id.to_string();
             let segment_clone = segment.clone();
             let storage_root = self.storage_root.clone();
+            let segment_storage = self.segment_storage.clone();
             
             tokio::spawn(async move {
-                if let Err(e) = Self::save_to_disk(&storage_root, &stream_id, &segment_clone).await {
+                if let Err(e) = Self::save_segment(
+                    &storage_root,
+                    &stream_id,
+                    &segment_clone,
+                    segment_storage.as_ref(),
+                ).await {
                     error!(target: "timeshift", "Failed to save segment: {}", e);
                 }
             });
@@ -192,16 +213,26 @@ impl TimeShiftCore {
             })
             .collect();
         
-        // 并行读取文件
+        // 并行读取分片
         let mut segments = Vec::new();
         for meta in metas {
-            match tokio::fs::read(&meta.file_path).await {
+            // 优先使用 flux-storage
+            let data_result = if let Some(ref storage) = self.segment_storage {
+                storage.load_segment(stream_id, meta.sequence).await
+            } else {
+                // 回退到文件系统
+                tokio::fs::read(&meta.file_path).await
+                    .map(Bytes::from)
+                    .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
+            };
+            
+            match data_result {
                 Ok(data) => {
                     segments.push(Segment {
                         sequence: meta.sequence,
                         start_time: meta.start_time,
                         duration: meta.duration,
-                        data: Bytes::from(data),
+                        data,
                         metadata: SegmentMetadata {
                             format: meta.format.clone(),
                             has_keyframe: meta.has_keyframe,
@@ -211,7 +242,7 @@ impl TimeShiftCore {
                     });
                 }
                 Err(e) => {
-                    error!(target: "timeshift", "Failed to read segment file: {}", e);
+                    error!(target: "timeshift", "Failed to load segment: {}", e);
                 }
             }
         }
@@ -219,29 +250,46 @@ impl TimeShiftCore {
         Ok(segments)
     }
 
-    /// 保存分片到磁盘
-    async fn save_to_disk(
+    /// 保存分片（优先使用 flux-storage，回退到文件系统）
+    async fn save_segment(
         storage_root: &PathBuf,
         stream_id: &str,
         segment: &Segment,
+        segment_storage: Option<&Arc<dyn SegmentStorage>>,
     ) -> Result<()> {
-        let stream_dir = storage_root.join(stream_id);
-        tokio::fs::create_dir_all(&stream_dir).await?;
-        
-        let filename = format!("segment_{}_{}.dat", 
-            segment.start_time.timestamp(),
-            segment.sequence
-        );
-        let file_path = stream_dir.join(&filename);
-        
-        tokio::fs::write(&file_path, &segment.data).await?;
-        
-        debug!(target: "timeshift",
-            stream_id = %stream_id,
-            sequence = segment.sequence,
-            size = segment.data.len(),
-            "Segment saved to disk"
-        );
+        // 优先使用 flux-storage
+        if let Some(storage) = segment_storage {
+            // 使用统一存储接口
+            storage
+                .save_segment(stream_id, segment.sequence, &segment.data)
+                .await?;
+            
+            debug!(target: "timeshift",
+                stream_id = %stream_id,
+                sequence = segment.sequence,
+                size = segment.data.len(),
+                "Segment saved via flux-storage"
+            );
+        } else {
+            // 回退到简单文件系统
+            let stream_dir = storage_root.join(stream_id);
+            tokio::fs::create_dir_all(&stream_dir).await?;
+            
+            let filename = format!("segment_{}_{}.dat", 
+                segment.start_time.timestamp(),
+                segment.sequence
+            );
+            let file_path = stream_dir.join(&filename);
+            
+            tokio::fs::write(&file_path, &segment.data).await?;
+            
+            debug!(target: "timeshift",
+                stream_id = %stream_id,
+                sequence = segment.sequence,
+                size = segment.data.len(),
+                "Segment saved to filesystem"
+            );
+        }
         
         Ok(())
     }

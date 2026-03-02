@@ -112,10 +112,40 @@ pub async fn cancel_command(
 
 /// 查询设备的指令历史
 pub async fn list_device_commands(
-    State(_state): State<AppState>,
-    Path(_device_id): Path<String>,
-    Query(_query): Query<ListCommandsQuery>,
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Query(query): Query<ListCommandsQuery>,
 ) -> Result<Json<Vec<CommandStatusResponse>>, ApiError> {
-    // TODO: 从数据库查询指令历史
-    Ok(Json(vec![]))
+    let limit = query.limit.unwrap_or(50).min(200); // 默认50条，最多200条
+    
+    #[cfg(feature = "persistence")]
+    {
+        let commands = state
+            .executor
+            .list_device_commands(&device_id, limit)
+            .await
+            .map_err(|e| ApiError::InternalError(e.to_string()))?;
+        
+        let responses: Vec<CommandStatusResponse> = commands
+            .into_iter()
+            .map(|cmd| CommandStatusResponse {
+                command_id: cmd.id,
+                device_id: cmd.device_id,
+                command_type: format!("{:?}", cmd.command_type),
+                status: format!("{:?}", cmd.status),
+                created_at: cmd.created_at.to_rfc3339(),
+                result: cmd.result,
+                error: cmd.error,
+            })
+            .collect();
+        
+        Ok(Json(responses))
+    }
+    
+    #[cfg(not(feature = "persistence"))]
+    {
+        // 如果没有启用持久化功能，返回空列表
+        tracing::warn!("Command history query requested but persistence feature is not enabled");
+        Ok(Json(vec![]))
+    }
 }

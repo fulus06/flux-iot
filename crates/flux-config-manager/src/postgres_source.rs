@@ -110,11 +110,67 @@ where
     }
 
     async fn watch(&self) -> Result<ConfigWatcher> {
-        // PostgreSQL 支持 LISTEN/NOTIFY 机制
-        // 这里简化实现，返回一个永不触发的 watcher
-        // 实际使用中可以通过 LISTEN/NOTIFY 实现实时通知
-        let (_tx, rx) = mpsc::channel(1);
+        // 使用 PostgreSQL LISTEN/NOTIFY 实现配置热重载
+        let (tx, rx) = mpsc::channel(100);
+        let pool = self.pool.clone();
+        let table_name = self.table_name.clone();
+        
+        // 启动监听任务
+        tokio::spawn(async move {
+            if let Err(e) = Self::listen_for_changes(pool, table_name, tx).await {
+                tracing::error!("Config watch task failed: {}", e);
+            }
+        });
+        
         Ok(ConfigWatcher::new(rx))
+    }
+    
+    /// 监听配置变更
+    async fn listen_for_changes(
+        pool: PgPool,
+        table_name: String,
+        tx: mpsc::Sender<ConfigEvent>,
+    ) -> Result<()> {
+        use sqlx::postgres::PgListener;
+        
+        // 创建监听器
+        let mut listener = PgListener::connect_with(&pool).await?;
+        
+        // 监听通道
+        let channel_name = format!("{}_changes", table_name);
+        listener.listen(&channel_name).await?;
+        
+        tracing::info!(
+            channel = %channel_name,
+            "Started listening for configuration changes"
+        );
+        
+        // 持续监听通知
+        loop {
+            match listener.recv().await {
+                Ok(notification) => {
+                    tracing::debug!(
+                        payload = %notification.payload(),
+                        "Received configuration change notification"
+                    );
+                    
+                    // 解析通知负载
+                    if let Ok(event) = serde_json::from_str::<ConfigEvent>(notification.payload()) {
+                        if let Err(e) = tx.send(event).await {
+                            tracing::error!("Failed to send config event: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error receiving notification: {}", e);
+                    // 短暂延迟后重试
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+        
+        Ok(())
     }
 }
 
